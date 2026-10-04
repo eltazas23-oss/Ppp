@@ -5,41 +5,132 @@
  */
 
 import * as THREE from 'three';
-import {
-  CircuitId,
-  SplinePoint,
-  CIRCUITS,
-  getActiveCircuitId,
-  getCircuitConfig,
-  getCircuitWaypoints,
-  setActiveCircuitId,
-} from './CircuitConfig';
 
-export type { SplinePoint, CircuitId };
+export interface SplinePoint {
+  x: number;
+  z: number;
+  speedLimitKmh: number;
+  yaw: number;
+}
 
 export const CIRCUIT_TOTAL_LENGTH = 974.76;
+
+// Circuit average race pace velocity (~208.5 km/h, calibrated to 16.8s representative F1 lap time)
 export const CIRCUIT_RACE_PACE_SPEED = 57.92; // m/s
 
 /**
- * Returns waypoints for the current active circuit
+ * Pre-generates the canonical closed racing line waypoints for the circuit
+ * Calibrates realistic F1 corner apex speeds (155-162 km/h) taking full advantage of ground effect & slick tire downforce.
  */
-export function buildCircuitWaypoints(id?: CircuitId): SplinePoint[] {
-  return getCircuitWaypoints(id);
+export function buildCircuitWaypoints(): SplinePoint[] {
+  const points: { x: number; z: number; speed: number }[] = [];
+  const r = 38;
+  const inner = 92;
+
+  // 1. Main Straight (z = -130, x from -92 to +92)
+  const numStraight = 22;
+  for (let i = 0; i <= numStraight; i++) {
+    const t = i / numStraight;
+    const speed = t < 0.72 ? 345 : THREE.MathUtils.lerp(345, 185, (t - 0.72) / 0.28);
+    points.push({ x: -inner + t * (2 * inner), z: -130, speed: Math.round(speed) });
+  }
+
+  // 2. Turn 1 (Top-Right): arc from (92, -130) to (130, -92) around center (92, -92)
+  // Apex speed calibrated to 158 km/h with downforce
+  const numCorner = 18;
+  for (let i = 1; i <= numCorner; i++) {
+    const angle = -Math.PI / 2 + (i / numCorner) * (Math.PI / 2);
+    const t = i / numCorner;
+    const cornerSpeed = t <= 0.55 ? THREE.MathUtils.lerp(185, 158, t / 0.55) : THREE.MathUtils.lerp(158, 205, (t - 0.55) / 0.45);
+    points.push({
+      x: inner + Math.cos(angle) * r,
+      z: -inner + Math.sin(angle) * r,
+      speed: Math.round(cornerSpeed),
+    });
+  }
+
+  // 3. Straight 1 (Right edge): x = 130, z from -92 to +92
+  for (let i = 1; i <= numStraight; i++) {
+    const t = i / numStraight;
+    const speed = t < 0.72 ? 340 : THREE.MathUtils.lerp(340, 185, (t - 0.72) / 0.28);
+    points.push({ x: 130, z: -inner + t * (2 * inner), speed: Math.round(speed) });
+  }
+
+  // 4. Turn 2 (Bottom-Right): arc from (130, 92) to (92, 130) around center (92, 92)
+  for (let i = 1; i <= numCorner; i++) {
+    const angle = 0 + (i / numCorner) * (Math.PI / 2);
+    const t = i / numCorner;
+    const cornerSpeed = t <= 0.55 ? THREE.MathUtils.lerp(185, 155, t / 0.55) : THREE.MathUtils.lerp(155, 205, (t - 0.55) / 0.45);
+    points.push({
+      x: inner + Math.cos(angle) * r,
+      z: inner + Math.sin(angle) * r,
+      speed: Math.round(cornerSpeed),
+    });
+  }
+
+  // 5. Straight 2 (Bottom edge): z = 130, x from +92 to -92
+  for (let i = 1; i <= numStraight; i++) {
+    const t = i / numStraight;
+    const speed = t < 0.72 ? 342 : THREE.MathUtils.lerp(342, 185, (t - 0.72) / 0.28);
+    points.push({ x: inner - t * (2 * inner), z: 130, speed: Math.round(speed) });
+  }
+
+  // 6. Turn 3 (Bottom-Left): arc from (-92, 130) to (-130, 92) around center (-92, 92)
+  for (let i = 1; i <= numCorner; i++) {
+    const angle = Math.PI / 2 + (i / numCorner) * (Math.PI / 2);
+    const t = i / numCorner;
+    const cornerSpeed = t <= 0.55 ? THREE.MathUtils.lerp(185, 155, t / 0.55) : THREE.MathUtils.lerp(155, 205, (t - 0.55) / 0.45);
+    points.push({
+      x: -inner + Math.cos(angle) * r,
+      z: inner + Math.sin(angle) * r,
+      speed: Math.round(cornerSpeed),
+    });
+  }
+
+  // 7. Straight 3 (Left edge): x = -130, z from +92 to -92
+  for (let i = 1; i <= numStraight; i++) {
+    const t = i / numStraight;
+    const speed = t < 0.72 ? 345 : THREE.MathUtils.lerp(345, 185, (t - 0.72) / 0.28);
+    points.push({ x: -130, z: inner - t * (2 * inner), speed: Math.round(speed) });
+  }
+
+  // 8. Turn 4 (Top-Left): arc from (-130, -92) to (-92, -130) around center (-92, -92)
+  for (let i = 1; i < numCorner; i++) {
+    const angle = Math.PI + (i / numCorner) * (Math.PI / 2);
+    const t = i / numCorner;
+    const cornerSpeed = t <= 0.55 ? THREE.MathUtils.lerp(185, 158, t / 0.55) : THREE.MathUtils.lerp(158, 210, (t - 0.55) / 0.45);
+    points.push({
+      x: -inner + Math.cos(angle) * r,
+      z: -inner + Math.sin(angle) * r,
+      speed: Math.round(cornerSpeed),
+    });
+  }
+
+  return points.map((pt, idx, arr) => {
+    const next = arr[(idx + 1) % arr.length];
+    const dx = next.x - pt.x;
+    const dz = next.z - pt.z;
+    const yaw = Math.atan2(dx, dz);
+    return {
+      x: pt.x,
+      z: pt.z,
+      speedLimitKmh: pt.speed,
+      yaw: yaw,
+    };
+  });
 }
 
 /**
- * Global accessor for default / active waypoints
+ * Cached global waypoint array
  */
-export const SHARED_CIRCUIT_WAYPOINTS = getCircuitWaypoints('square_gp');
+export const SHARED_CIRCUIT_WAYPOINTS = buildCircuitWaypoints();
 
 /**
  * Projects an arbitrary 2D world position (x, z) onto the circuit centerline
- * to return exact distance along lap in meters.
+ * to return exact distance along lap in meters (0 to 974.76m).
  */
-export function getTrackDistanceAtPosition(x: number, z: number, circuitId?: CircuitId): number {
-  const currentConfig = getCircuitConfig(circuitId);
-  const pts = getCircuitWaypoints(currentConfig.id);
-  const totalLength = currentConfig.lengthMeters;
+export function getTrackDistanceAtPosition(x: number, z: number): number {
+  const pts = SHARED_CIRCUIT_WAYPOINTS;
   const numPts = pts.length;
   let closestIdx = 0;
   let minDsq = Infinity;
@@ -54,7 +145,7 @@ export function getTrackDistanceAtPosition(x: number, z: number, circuitId?: Cir
     }
   }
 
-  return (closestIdx / numPts) * totalLength;
+  return (closestIdx / numPts) * CIRCUIT_TOTAL_LENGTH;
 }
 
 /**

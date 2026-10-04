@@ -43,12 +43,8 @@ import { MultiplayerRoomState } from '../game/multiplayer/MultiplayerClient';
 import { RaceDifficulty, RaceLapOption } from '../game/career/CareerTypes';
 import { TireCompoundType } from '../game/physics/TireCompound';
 import { playUiClick, playUiHover, playModeSelectChime } from '../utils/uiAudio';
-import { CircuitId, getCircuitConfig } from '../game/career/CircuitConfig';
-import { TrackSelectorModal } from './TrackSelectorModal';
 
 interface MainMenuDashboardProps {
-  selectedCircuit?: CircuitId;
-  onSelectCircuit?: (id: CircuitId) => void;
   onStartSolo: (
     cameraDistance: CameraDistanceMode,
     cameraMode: CameraViewMode,
@@ -89,8 +85,6 @@ interface MainMenuDashboardProps {
 }
 
 export const MainMenuDashboard: React.FC<MainMenuDashboardProps> = ({
-  selectedCircuit = 'square_gp',
-  onSelectCircuit,
   onStartSolo,
   onStartFreePractice,
   onCreateRoom,
@@ -111,8 +105,6 @@ export const MainMenuDashboard: React.FC<MainMenuDashboardProps> = ({
   // Navigation & Tabs
   const [activeTab, setActiveTab] = useState<'grand_prix' | 'free_practice' | 'multiplayer' | 'garage'>('grand_prix');
   const [multiplayerSubView, setMultiplayerSubView] = useState<'create' | 'join'>('create');
-  const [showTrackModal, setShowTrackModal] = useState<boolean>(false);
-  const circuitConfig = getCircuitConfig(selectedCircuit);
 
   // Pilot Profile
   const [playerName, setPlayerName] = useState<string>('Piloto ' + Math.floor(100 + Math.random() * 900));
@@ -560,32 +552,6 @@ export const MainMenuDashboard: React.FC<MainMenuDashboardProps> = ({
                 </div>
               </div>
 
-              {/* 0. Circuit Selector Banner */}
-              <div className="p-4 rounded-2xl bg-neutral-950/80 border border-red-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <span className="text-3xl">{circuitConfig.flag}</span>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-red-400 font-mono uppercase">CIRCUITO SELECCIONADO</span>
-                      <span className="text-[9px] px-2 py-0.5 bg-red-500/20 text-red-300 rounded font-bold">{circuitConfig.badge}</span>
-                    </div>
-                    <h4 className="text-base font-black text-white">{circuitConfig.name}</h4>
-                    <p className="text-xs text-neutral-400 font-mono">{circuitConfig.lengthMeters} m · {circuitConfig.turnsCount} Curvas · Top Speed: {circuitConfig.topSpeedKmh} km/h</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    playUiClick(800);
-                    setShowTrackModal(true);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-red-600/30 hover:bg-red-600/50 text-red-200 hover:text-white border border-red-500/40 font-bold text-xs uppercase font-mono tracking-wider transition-all flex items-center gap-1.5 shrink-0 active:scale-95"
-                >
-                  <span>CAMBIAR CIRCUITO</span>
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-
               {/* 1. Distance Selector */}
               <div className="flex flex-col gap-2">
                 <label className="text-xs font-bold font-mono uppercase tracking-wider text-neutral-300">
@@ -776,32 +742,6 @@ export const MainMenuDashboard: React.FC<MainMenuDashboardProps> = ({
                     Pista libre sin tráfico de IA ni penalizaciones de reglamento
                   </p>
                 </div>
-              </div>
-
-              {/* Circuit Selector Banner for Free Practice */}
-              <div className="p-4 rounded-2xl bg-neutral-950/80 border border-blue-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <span className="text-3xl">{circuitConfig.flag}</span>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-blue-400 font-mono uppercase">CIRCUITO SELECCIONADO</span>
-                      <span className="text-[9px] px-2 py-0.5 bg-blue-500/20 text-blue-300 rounded font-bold">{circuitConfig.badge}</span>
-                    </div>
-                    <h4 className="text-base font-black text-white">{circuitConfig.name}</h4>
-                    <p className="text-xs text-neutral-400 font-mono">{circuitConfig.lengthMeters} m · {circuitConfig.turnsCount} Curvas · Top Speed: {circuitConfig.topSpeedKmh} km/h</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    playUiClick(800);
-                    setShowTrackModal(true);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-blue-600/30 hover:bg-blue-600/50 text-blue-200 hover:text-white border border-blue-500/40 font-bold text-xs uppercase font-mono tracking-wider transition-all flex items-center gap-1.5 shrink-0 active:scale-95"
-                >
-                  <span>CAMBIAR CIRCUITO</span>
-                  <ChevronRight className="w-4 h-4" />
-                </button>
               </div>
 
               <div className="flex flex-col gap-3 text-sm text-neutral-300 leading-relaxed">
@@ -1198,18 +1138,6 @@ export const MainMenuDashboard: React.FC<MainMenuDashboardProps> = ({
             </div>
           </div>
         </div>
-      )}
-      {/* Track Selector Modal */}
-      {showTrackModal && (
-        <TrackSelectorModal
-          selectedCircuit={selectedCircuit}
-          onSelectCircuit={(id) => {
-            if (onSelectCircuit) {
-              onSelectCircuit(id);
-            }
-          }}
-          onClose={() => setShowTrackModal(false)}
-        />
       )}
     </div>
   );

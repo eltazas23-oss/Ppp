@@ -9,7 +9,6 @@
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import asphaltImg from '../../assets/images/track_asphalt_detail_1790904767865.jpg';
-import { SHARED_CIRCUIT_WAYPOINTS, MASTER_CIRCUIT_NODES } from '../career/CircuitWaypoints';
 
 export interface StaticObstacle {
   x: number;
@@ -608,47 +607,20 @@ export class TrackBuilder {
   }
 
   /**
-   * Calculates the exact minimum Euclidean distance from any 2D point (x, z)
-   * to the closest Catmull-Rom spline segment of the official F1 Grand Prix circuit.
-   */
-  public getDistanceToCircuitSpline(x: number, z: number): number {
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
-    let minDsq = Infinity;
-
-    for (let i = 0; i < numPts; i++) {
-      const p1 = waypoints[i];
-      const p2 = waypoints[(i + 1) % numPts];
-      const dx = p2.x - p1.x;
-      const dz = p2.z - p1.z;
-      const lenSq = dx * dx + dz * dz;
-      let t = lenSq > 0.0001 ? ((x - p1.x) * dx + (z - p1.z) * dz) / lenSq : 0;
-      t = Math.max(0, Math.min(1, t));
-
-      const nearX = p1.x + t * dx;
-      const nearZ = p1.z + t * dz;
-      const dsq = (x - nearX) * (x - nearX) + (z - nearZ) * (z - nearZ);
-      if (dsq < minDsq) {
-        minDsq = dsq;
-      }
-    }
-
-    return Math.sqrt(minDsq);
-  }
-
-  /**
    * High-performance 3D Grass Tufts rendered in 1 single draw call via InstancedMesh.
    * Features strict geometric clearance testing: ZERO grass penetrates grandstands,
    * concrete barrier walls, catch fencing, pit buildings, helipad or asphalt track.
    */
   private buildGrassTufts(parent: THREE.Group): void {
-    const tuftCount = 18000;
+    const tuftCount = 22000;
     // 2 intersecting perpendicular planes (4 triangles) for lush volume with 33% less overdraw
-    const p1 = new THREE.PlaneGeometry(1.10, 0.85);
-    p1.translate(0, 0.38, 0);
+    const p1 = new THREE.PlaneGeometry(1.20, 0.90);
+    // Lower slightly so root base vertices are buried -0.05m underground (no edge floating or z-fighting!)
+    p1.translate(0, 0.40, 0);
     const p2 = p1.clone();
     p2.rotateY(Math.PI / 2);
 
+    // Merge p1 and p2 into a single buffer geometry
     const pos1 = p1.attributes.position.array as Float32Array;
     const uv1 = p1.attributes.uv.array as Float32Array;
     const idx1 = p1.index?.array as Uint16Array;
@@ -665,6 +637,7 @@ export class TrackBuilder {
     combinedPos.set(pos1, 0);
     combinedPos.set(pos2, pos1.length);
 
+    // Flare top vertices slightly outward (+15%) for a lush organic fountain shape
     for (let i = 1; i < combinedPos.length; i += 3) {
       if (combinedPos[i] > 0.4) {
         combinedPos[i - 1] *= 1.15;
@@ -688,63 +661,87 @@ export class TrackBuilder {
     tuftGeo.computeVertexNormals();
 
     const instancedTufts = new THREE.InstancedMesh(tuftGeo, this.grassTuftMat, tuftCount);
+    // Crucial for 60 FPS: Grass tufts do not need shadow map lookups; ambient bounce + sun provide lush lighting!
     instancedTufts.receiveShadow = false;
 
     const dummy = new THREE.Object3D();
     const color = new THREE.Color();
     let idx = 0;
 
+    const c = this.innerCornerCenter; // 92
+    const cornerCenters = [
+      { cx: c, cz: -c },
+      { cx: c, cz: c },
+      { cx: -c, cz: c },
+      { cx: -c, cz: -c },
+    ];
+
     /**
      * Strict spatial validation: rejects any grass tuft that would touch or penetrate:
-     * - Track asphalt surface and kerbs (16m width = 8m half-width + 1.4m kerb + barrier margin = rejects < 13.0m)
-     * - Concrete barriers (walls at ~11.2m)
-     * - Pit Lane, Paddock Garages & Team Transporters
+     * - Grandstands (South or North)
+     * - Pit Lane, Paddock Club Garages, Team Transporters
      * - Helipad
-     * - South Main Grandstand and North Grandstand
+     * - Concrete barriers (walls) and catch fences
+     * - Asphalt track surface and kerbs
      * - Gravel runoff traps
      */
     const isGrassAllowed = (gx: number, gz: number): boolean => {
-      // 1. Distance to F1 track spline centerline (Track width 16m = 8m half-width + 1.4m kerb + barrier margin)
-      const distToTrack = this.getDistanceToCircuitSpline(gx, gz);
-      if (distToTrack < 13.0) {
-        return false; // ZERO GRASS ON ASPHALT, KERBS OR NEAR TRACK CORRIDOR!
-      }
+      // 1. South Main Grandstand Exclusion Zone (including canopy & VIP box)
+      if (gx >= -68 && gx <= 68 && gz >= -168 && gz <= -139.2) return false;
 
-      // 2. Concrete Barrier Walls are at ~11.2m from track centerline (give 1.8m clearance)
-      if (Math.abs(distToTrack - 11.2) < 1.8) {
-        return false;
-      }
+      // 2. North Grandstand Exclusion Zone
+      if (gx >= -48 && gx <= 48 && gz >= 139.2 && gz <= 164) return false;
 
       // 3. Pit Lane, Paddock Garages & Team Transporters
-      if (gx >= -85 && gx <= 65 && gz >= -132 && gz <= -80) {
-        return false;
+      if (gx >= -60 && gx <= 56 && gz >= -124 && gz <= -86) return false;
+
+      // 4. Helipad (radius 18m around 30, 30)
+      if ((gx - 30) ** 2 + (gz - 30) ** 2 < 18 * 18) return false;
+
+      // 5. Track Asphalt Surface & Starting Grid (Straight sections)
+      if (Math.abs(gx) <= 92 && gz >= -138.8 && gz <= -121.2) return false;
+      if (Math.abs(gx) <= 92 && gz >= 121.2 && gz <= 138.8) return false;
+      if (gx >= 121.2 && gx <= 138.8 && Math.abs(gz) <= 92) return false;
+      if (gx >= -138.8 && gx <= -121.2 && Math.abs(gz) <= 92) return false;
+
+      // 6. Corner Curved Roads, Kerbs & Gravel Traps (in the 4 corner apexes)
+      for (const cc of cornerCenters) {
+        const dx = gx - cc.cx;
+        const dz = gz - cc.cz;
+        const signX = Math.sign(cc.cx);
+        const signZ = Math.sign(cc.cz);
+        if (dx * signX >= -2 && dz * signZ >= -2) {
+          const distSq = dx * dx + dz * dz;
+          if (distSq >= 25.5 * 25.5 && distSq <= 63.0 * 63.0) {
+            return false;
+          }
+        }
       }
 
-      // 4. Helipad (radius 20m around 30, 30)
-      if ((gx - 30) ** 2 + (gz - 30) ** 2 < 20 * 20) {
-        return false;
-      }
+      // 7. Concrete Barrier Walls (wall thickness 0.75m + grass radius 0.65m = clearance 1.05m)
+      const wallClr = 1.05;
+      if (Math.abs(gx) <= 92 && (Math.abs(gz - 140) < wallClr || Math.abs(gz + 140) < wallClr)) return false;
+      if (Math.abs(gz) <= 92 && (Math.abs(gx - 140) < wallClr || Math.abs(gx + 140) < wallClr)) return false;
+      if (Math.abs(gx) <= 92 && (Math.abs(gz - 120) < wallClr || Math.abs(gz + 120) < wallClr)) return false;
+      if (Math.abs(gz) <= 92 && (Math.abs(gx - 120) < wallClr || Math.abs(gx + 120) < wallClr)) return false;
 
-      // 5. South Main Grandstand Exclusion Zone
-      if (gx >= -78 && gx <= 78 && gz >= -175 && gz <= -138) {
-        return false;
+      // Corner outer and inner curved walls
+      for (const cc of cornerCenters) {
+        const dx = gx - cc.cx;
+        const dz = gz - cc.cz;
+        const signX = Math.sign(cc.cx);
+        const signZ = Math.sign(cc.cz);
+        if (dx * signX >= -2 && dz * signZ >= -2) {
+          const dist = Math.hypot(dx, dz);
+          if (Math.abs(dist - 48.0) < wallClr) return false;
+          if (Math.abs(dist - 24.0) < wallClr) return false;
+        }
       }
-
-      // 6. North Grandstand Exclusion Zone
-      if (gx >= -52 && gx <= 52 && gz >= 138 && gz <= 170) {
-        return false;
-      }
-
-      // 7. Gravel Runoff Traps
-      if (gx >= 105 && gx <= 170 && gz >= -155 && gz <= -115) return false;
-      if (gx >= -110 && gx <= -25 && gz >= 218 && gz <= 255) return false;
-      if (gx >= -135 && gx <= -90 && gz >= -130 && gz <= -65) return false;
-      if (gx >= -110 && gx <= -50 && gz >= -155 && gz <= -120) return false;
 
       return true;
     };
 
-    const addTuft = (x: number, z: number, scale = 1.0, jitter = 0.4) => {
+    const addTuft = (x: number, z: number, scale = 1.0, jitter = 0.25) => {
       if (idx >= tuftCount) return;
       const jx = (Math.random() - 0.5) * jitter;
       const jz = (Math.random() - 0.5) * jitter;
@@ -761,33 +758,108 @@ export class TrackBuilder {
       instancedTufts.setColorAt(idx++, color);
     };
 
-    // 1. DENSE VERGE MEADOWS along the outer perimeter (15m to 42m from track centerline)
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
+    // =========================================================================
+    // 1. 4 CORNER OUTER CURVES: DENSE RUNOFF MEADOWS & FOREST FLOOR (63.6m to 96m)
+    // Placed first to guarantee 100% full lush grass coverage across all 4 corner curves!
+    // =========================================================================
+    cornerCenters.forEach(({ cx, cz }) => {
+      const signX = Math.sign(cx);
+      const signZ = Math.sign(cz);
+      for (let r = 63.6; r <= 96.0; r += 1.8) {
+        const step = 1.25 / r;
+        for (let a = 0.04; a < Math.PI / 2 - 0.04; a += step) {
+          const kx = cx + signX * Math.cos(a) * r;
+          const kz = cz + signZ * Math.sin(a) * r;
+          addTuft(kx, kz, 1.30, 0.45);
+        }
+      }
+    });
 
-    for (let i = 0; i < numPts; i += 2) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const dx = nextPt.x - pt.x;
-      const dz = nextPt.z - pt.z;
-      const segLen = Math.hypot(dx, dz) || 1;
-      const nx = -dz / segLen;
-      const nz = dx / segLen;
+    // =========================================================================
+    // 2. 4 CORNER INNER APEX NATURAL GREENS (Inside corner apexes, 4.0m to 23.2m)
+    // =========================================================================
+    cornerCenters.forEach(({ cx, cz }) => {
+      const signX = Math.sign(cx);
+      const signZ = Math.sign(cz);
+      for (let r = 4.0; r <= 23.2; r += 1.6) {
+        const step = 1.1 / r;
+        for (let a = 0.06; a < Math.PI / 2 - 0.06; a += step) {
+          const kx = cx - signX * Math.cos(a) * r;
+          const kz = cz - signZ * Math.sin(a) * r;
+          addTuft(kx, kz, 1.25, 0.35);
+        }
+      }
+    });
 
-      // Outer Left Verge & Infield Right Verge strips
-      for (let offset = 14.5; offset <= 38.0; offset += 2.4) {
-        addTuft(pt.x + nx * offset, pt.z + nz * offset, 1.25, 0.8);
-        addTuft(pt.x - nx * offset, pt.z - nz * offset, 1.25, 0.8);
+    // =========================================================================
+    // 3. INFIELD PERIMETER CORRIDORS (Hugging inner barrier walls & tree lines)
+    // =========================================================================
+    // North Infield Corridor (z ≈ 111 to 118.5)
+    for (let x = -85; x <= 85; x += 1.5) {
+      for (let d = 111.5; d <= 118.0; d += 2.2) {
+        addTuft(x, d, 1.2, 0.4);
       }
     }
 
-    // 2. WIDE INFIELD AND OUTFIELD NATURAL GRASS MEADOWS (Grid distribution with strict spatial filter)
-    for (let gx = -210; gx <= 210; gx += 3.6) {
-      for (let gz = -170; gz <= 245; gz += 3.6) {
-        addTuft(gx, gz, 1.15, 1.2);
+    // East Infield Corridor (x ≈ 111 to 118.5)
+    for (let z = -85; z <= 85; z += 1.5) {
+      for (let d = 111.5; d <= 118.0; d += 2.2) {
+        addTuft(d, z, 1.2, 0.4);
       }
     }
 
+    // West Infield Corridor (x ≈ -111 to -118.5)
+    for (let z = -85; z <= 85; z += 1.5) {
+      for (let d = 111.5; d <= 118.0; d += 2.2) {
+        addTuft(-d, z, 1.2, 0.4);
+      }
+    }
+
+    // South Infield Corridor (Flanking pit & paddock wings)
+    for (let x = -85; x <= 85; x += 1.5) {
+      if (x < -60 || x > 56) {
+        for (let d = 111.5; d <= 118.0; d += 2.2) {
+          addTuft(x, -d, 1.2, 0.4);
+        }
+      }
+    }
+
+    // =========================================================================
+    // 4. OUTFIELD PERIMETER MEADOWS (Outside outer barriers, hugging tree corridors)
+    // =========================================================================
+    // South Outfield Meadow (West and East wings clear of Grandstand)
+    for (let x = -135; x <= 135; x += 1.5) {
+      if (x < -68 || x > 68) {
+        for (let d = 142.0; d <= 152.0; d += 2.5) {
+          addTuft(x, -d, 1.25, 0.45);
+        }
+      }
+    }
+
+    // North Outfield Meadow (West and East wings clear of North Stand)
+    for (let x = -135; x <= 135; x += 1.5) {
+      if (x < -48 || x > 48) {
+        for (let d = 142.0; d <= 152.0; d += 2.5) {
+          addTuft(x, d, 1.25, 0.45);
+        }
+      }
+    }
+
+    // East Outfield Meadow
+    for (let z = -125; z <= 125; z += 1.5) {
+      for (let d = 142.0; d <= 152.0; d += 2.5) {
+        addTuft(d, z, 1.25, 0.45);
+      }
+    }
+
+    // West Outfield Meadow
+    for (let z = -125; z <= 125; z += 1.5) {
+      for (let d = 142.0; d <= 152.0; d += 2.5) {
+        addTuft(-d, z, 1.25, 0.45);
+      }
+    }
+
+    // Shrink active draw count to only successfully placed instances (GPU performance boost!)
     instancedTufts.count = idx;
     instancedTufts.instanceMatrix.needsUpdate = true;
     if (instancedTufts.instanceColor) instancedTufts.instanceColor.needsUpdate = true;
@@ -802,35 +874,33 @@ export class TrackBuilder {
     const terrainGroup = new THREE.Group();
 
     // 1. Massive Ground Plane
-    const groundGeo = new THREE.PlaneGeometry(850, 850, 32, 32);
+    const groundGeo = new THREE.PlaneGeometry(750, 750, 32, 32);
     groundGeo.rotateX(-Math.PI / 2);
     const ground = new THREE.Mesh(groundGeo, this.grassMat);
     ground.receiveShadow = true;
     terrainGroup.add(ground);
 
-    // 2. Real FIA Gravel Runoff Beds outside heavy braking zones
-    const gravelBeds = [
-      // Turn 1 Chicane Runoff
-      { x: 138, z: -136, width: 36, length: 22, rot: 0.2 },
-      // Turn 8 Slow Hairpin Runoff
-      { x: -70, z: 236, width: 55, length: 24, rot: -0.1 },
-      // Turn 9 130R Curvone Runoff
-      { x: -116, z: -98, width: 22, length: 44, rot: 0.1 },
-      // Turn 10 Bus Stop Chicane Runoff
-      { x: -82, z: -138, width: 38, length: 20, rot: -0.1 },
+    // 2. Corner Gravel Runoff Traps (Behind corner apexes for realistic FIA safety)
+    const corners = [
+      { x: 128, z: -128, rot: 0 },
+      { x: 128, z: 128, rot: Math.PI / 2 },
+      { x: -128, z: 128, rot: Math.PI },
+      { x: -128, z: -128, rot: -Math.PI / 2 },
     ];
 
-    gravelBeds.forEach((bed) => {
-      const gGeo = new THREE.PlaneGeometry(bed.width, bed.length, 12, 12);
-      gGeo.rotateX(-Math.PI / 2);
-      const gMesh = new THREE.Mesh(gGeo, this.gravelMat);
-      gMesh.position.set(bed.x, 0.008, bed.z);
-      gMesh.rotation.y = bed.rot;
-      gMesh.receiveShadow = true;
-      terrainGroup.add(gMesh);
+    corners.forEach((c) => {
+      const gravelGeo = new THREE.RingGeometry(this.cornerRadius + this.trackWidth / 2 + 1.2, this.cornerRadius + this.trackWidth / 2 + 16, 24, 1, 0, Math.PI / 2);
+      gravelGeo.rotateX(-Math.PI / 2);
+      const gravel = new THREE.Mesh(gravelGeo, this.gravelMat);
+      const cx = c.x > 0 ? this.innerCornerCenter : -this.innerCornerCenter;
+      const cz = c.z > 0 ? this.innerCornerCenter : -this.innerCornerCenter;
+      gravel.position.set(cx, 0.008, cz);
+      gravel.rotation.y = c.rot;
+      gravel.receiveShadow = true;
+      terrainGroup.add(gravel);
     });
 
-    // 3. Infield Helipad (at 30, 30 in the central green)
+    // 3. Infield Asphalt Service Road & Helipad
     const heliGeo = new THREE.CircleGeometry(16, 32);
     heliGeo.rotateX(-Math.PI / 2);
     const heliCanvas = document.createElement('canvas');
@@ -856,102 +926,139 @@ export class TrackBuilder {
     helipad.receiveShadow = true;
     terrainGroup.add(helipad);
 
-    // 4. Volumetric 3D Grass Tufts concentrated along the landscape corridors
+    // 4. Compacted Dirt/Soil Shoulder Transition Strips along Kerbs and Track Limits
+    const c = this.innerCornerCenter; // 92
+    const half = this.halfSize; // 130
+    const w = this.trackWidth; // 16
+    const shoulderWidth = 2.2;
+
+    // Straight Outer Dirt Shoulders
+    const straightShoulderGeoX = new THREE.PlaneGeometry(c * 2 + 16, shoulderWidth);
+    straightShoulderGeoX.rotateX(-Math.PI / 2);
+
+    const sSouth = new THREE.Mesh(straightShoulderGeoX, this.dirtShoulderMat);
+    sSouth.position.set(0, 0.007, -half - w / 2 - shoulderWidth / 2 - 0.1);
+    sSouth.receiveShadow = true;
+    terrainGroup.add(sSouth);
+
+    const sNorth = new THREE.Mesh(straightShoulderGeoX, this.dirtShoulderMat);
+    sNorth.position.set(0, 0.007, half + w / 2 + shoulderWidth / 2 + 0.1);
+    sNorth.receiveShadow = true;
+    terrainGroup.add(sNorth);
+
+    const straightShoulderGeoZ = new THREE.PlaneGeometry(shoulderWidth, c * 2 + 16);
+    straightShoulderGeoZ.rotateX(-Math.PI / 2);
+
+    const sEast = new THREE.Mesh(straightShoulderGeoZ, this.dirtShoulderMat);
+    sEast.position.set(half + w / 2 + shoulderWidth / 2 + 0.1, 0.007, 0);
+    sEast.receiveShadow = true;
+    terrainGroup.add(sEast);
+
+    const sWest = new THREE.Mesh(straightShoulderGeoZ, this.dirtShoulderMat);
+    sWest.position.set(-half - w / 2 - shoulderWidth / 2 - 0.1, 0.007, 0);
+    sWest.receiveShadow = true;
+    terrainGroup.add(sWest);
+
+    // Straight Inner Dirt Shoulders (North, East, West)
+    const sNorthIn = new THREE.Mesh(straightShoulderGeoX, this.dirtShoulderMat);
+    sNorthIn.position.set(0, 0.007, half - w / 2 - shoulderWidth / 2 - 0.1);
+    sNorthIn.receiveShadow = true;
+    terrainGroup.add(sNorthIn);
+
+    const sEastIn = new THREE.Mesh(straightShoulderGeoZ, this.dirtShoulderMat);
+    sEastIn.position.set(half - w / 2 - shoulderWidth / 2 - 0.1, 0.007, 0);
+    sEastIn.receiveShadow = true;
+    terrainGroup.add(sEastIn);
+
+    const sWestIn = new THREE.Mesh(straightShoulderGeoZ, this.dirtShoulderMat);
+    sWestIn.position.set(-half + w / 2 + shoulderWidth / 2 + 0.1, 0.007, 0);
+    sWestIn.receiveShadow = true;
+    terrainGroup.add(sWestIn);
+
+    // 4 Corner Apex Inner Dirt Arcs
+    corners.forEach((cr) => {
+      const cx = cr.x > 0 ? this.innerCornerCenter : -this.innerCornerCenter;
+      const cz = cr.z > 0 ? this.innerCornerCenter : -this.innerCornerCenter;
+      const arcGeo = new THREE.RingGeometry(this.cornerRadius - this.trackWidth / 2 - shoulderWidth - 0.1, this.cornerRadius - this.trackWidth / 2 - 0.1, 24, 1, 0, Math.PI / 2);
+      arcGeo.rotateX(-Math.PI / 2);
+      const arc = new THREE.Mesh(arcGeo, this.dirtShoulderMat);
+      arc.position.set(cx, 0.007, cz);
+      arc.rotation.y = cr.rot + Math.PI;
+      arc.receiveShadow = true;
+      terrainGroup.add(arc);
+    });
+
+    // 5. Volumetric 3D Grass Tufts concentrated 100% along the track corridors
     this.buildGrassTufts(terrainGroup);
 
     this.group.add(terrainGroup);
   }
 
   /**
-   * Continuous Asphalt Racing Surface with Pit Lane Integration along F1 Spline
+   * Continuous Asphalt Racing Surface with Pit Lane Integration
    */
   private buildSquareCircuitTrack(): void {
     const trackGroup = new THREE.Group();
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
+    const half = this.halfSize;
     const w = this.trackWidth;
-    const halfW = w / 2;
-    const shoulderW = 0.6; // 3D tapered edge down to ground level
+    const c = this.innerCornerCenter;
+    const straightLen = c * 2;
 
-    // 1. Full 3D Extruded Asphalt Ribbon along Catmull-Rom GP Spline
-    const positions: number[] = [];
-    const uvs: number[] = [];
-    const indices: number[] = [];
-    let accumulatedDist = 0;
+    // 4 Straight Sections (Subdivided to 32 segments to match corner mesh resolution and eliminate T-junctions)
+    const hGeo = new THREE.PlaneGeometry(straightLen, w, 32, 2);
+    hGeo.rotateX(-Math.PI / 2);
 
-    for (let i = 0; i < numPts; i++) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const dx = nextPt.x - pt.x;
-      const dz = nextPt.z - pt.z;
-      const segLen = Math.hypot(dx, dz) || 1.0;
-      const nx = -dz / segLen;
-      const nz = dx / segLen;
+    const vGeo = new THREE.PlaneGeometry(w, straightLen, 2, 32);
+    vGeo.rotateX(-Math.PI / 2);
 
-      // Track boundaries (Elevated at y = 0.040 to prevent any ground Z-fighting)
-      const leftX = pt.x + nx * halfW;
-      const leftZ = pt.z + nz * halfW;
-      const rightX = pt.x - nx * halfW;
-      const rightZ = pt.z - nz * halfW;
+    // South Straight (Main straight)
+    const southTrack = new THREE.Mesh(hGeo, this.asphaltMat);
+    southTrack.position.set(0, 0.005, -half);
+    southTrack.receiveShadow = true;
+    trackGroup.add(southTrack);
 
-      // Road shoulder edges (tapered to ground y = 0.000)
-      const leftShoulderX = pt.x + nx * (halfW + shoulderW);
-      const leftShoulderZ = pt.z + nz * (halfW + shoulderW);
-      const rightShoulderX = pt.x - nx * (halfW + shoulderW);
-      const rightShoulderZ = pt.z - nz * (halfW + shoulderW);
+    // North Straight
+    const northTrack = new THREE.Mesh(hGeo, this.asphaltMat);
+    northTrack.position.set(0, 0.005, half);
+    northTrack.receiveShadow = true;
+    trackGroup.add(northTrack);
 
-      positions.push(leftShoulderX, 0.000, leftShoulderZ); // idx 0
-      positions.push(leftX, 0.040, leftZ);                 // idx 1
-      positions.push(rightX, 0.040, rightZ);               // idx 2
-      positions.push(rightShoulderX, 0.000, rightShoulderZ);// idx 3
+    // East Straight
+    const eastTrack = new THREE.Mesh(vGeo, this.asphaltMat);
+    eastTrack.position.set(half, 0.005, 0);
+    eastTrack.receiveShadow = true;
+    trackGroup.add(eastTrack);
 
-      const v = accumulatedDist * 0.18;
-      uvs.push(0.00, v);
-      uvs.push(0.06, v);
-      uvs.push(0.94, v);
-      uvs.push(1.00, v);
+    // West Straight
+    const westTrack = new THREE.Mesh(vGeo, this.asphaltMat);
+    westTrack.position.set(-half, 0.005, 0);
+    westTrack.receiveShadow = true;
+    trackGroup.add(westTrack);
 
-      accumulatedDist += segLen;
-    }
+    // 4 Rounded Corner Sections
+    const innerR = this.cornerRadius - w / 2;
+    const outerR = this.cornerRadius + w / 2;
 
-    for (let i = 0; i < numPts; i++) {
-      const nextI = (i + 1) % numPts;
-      const b0 = i * 4;
-      const b1 = nextI * 4;
+    // Corner 1: South-East (Turn 1)
+    trackGroup.add(this.createCornerRoadMesh(c, -c, innerR, outerR, -Math.PI / 2, 0));
+    // Corner 2: North-East (Turn 2)
+    trackGroup.add(this.createCornerRoadMesh(c, c, innerR, outerR, 0, Math.PI / 2));
+    // Corner 3: North-West (Turn 3)
+    trackGroup.add(this.createCornerRoadMesh(-c, c, innerR, outerR, Math.PI / 2, Math.PI));
+    // Corner 4: South-West (Turn 4)
+    trackGroup.add(this.createCornerRoadMesh(-c, -c, innerR, outerR, Math.PI, Math.PI * 1.5));
 
-      // Left shoulder quad
-      indices.push(b0, b0 + 1, b1);
-      indices.push(b0 + 1, b1 + 1, b1);
-
-      // Main elevated asphalt ribbon
-      indices.push(b0 + 1, b0 + 2, b1 + 1);
-      indices.push(b0 + 2, b1 + 2, b1 + 1);
-
-      // Right shoulder quad
-      indices.push(b0 + 2, b0 + 3, b1 + 2);
-      indices.push(b0 + 3, b1 + 3, b1 + 2);
-    }
-
-    const roadGeo = new THREE.BufferGeometry();
-    roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    roadGeo.setIndex(indices);
-    roadGeo.computeVertexNormals();
-
-    const roadMesh = new THREE.Mesh(roadGeo, this.asphaltMat);
-    roadMesh.receiveShadow = true;
-    trackGroup.add(roadMesh);
-
-    // 2. Pit Lane Seamless Asphalt Apron
-    // Spans between main straight (z = -122) and pit garages (z = -106), x from -75 to 55
-    const pitApronGeo = new THREE.PlaneGeometry(130, 16.5, 32, 2);
+    // Pit Lane Seamless Asphalt Apron
+    // Flush meeting with South Straight at z = -122.0 (inner edge of South Track is -130 + 8 = -122.0).
+    // Pit Apron width = 16.5, center z = -113.75 -> spans from -122.0 to -105.5 reaching all garages and mechanics.
+    const pitApronGeo = new THREE.PlaneGeometry(160, 16.5, 32, 2);
     pitApronGeo.rotateX(-Math.PI / 2);
     const pitApron = new THREE.Mesh(pitApronGeo, this.asphaltMat);
-    pitApron.position.set(-10, 0.040, -113.75);
+    pitApron.position.set(0, 0.005, -113.75);
     pitApron.receiveShadow = true;
     trackGroup.add(pitApron);
 
-    // 3. Paint FIA White Road Markings & Boundary Lines
+    // Paint FIA White Road Markings & Boundary Lines
     this.buildTrackAndPitRoadLines(trackGroup);
 
     this.group.add(trackGroup);
@@ -986,117 +1093,232 @@ export class TrackBuilder {
       polygonOffsetUnits: -2.0,
     });
 
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
-    const halfW = this.trackWidth / 2;
+    const half = this.halfSize;
+    const w = this.trackWidth;
+    const c = this.innerCornerCenter;
+    const straightLen = c * 2; // 184m
 
-    // --- A. CONTINUOUS FIA TRACK LIMIT BOUNDARY LINES (Inner & Outer) ---
-    const leftLinePos: number[] = [];
-    const leftLineIdx: number[] = [];
-    const rightLinePos: number[] = [];
-    const rightLineIdx: number[] = [];
-    const rubberPos: number[] = [];
-    const rubberIdx: number[] = [];
+    // --- A. CONTINUOUS FIA TRACK LIMIT BOUNDARY LINES (Inner & Outer edges on all 4 straights) ---
+    const hLineGeo = new THREE.PlaneGeometry(straightLen, 0.25);
+    hLineGeo.rotateX(-Math.PI / 2);
+    const vLineGeo = new THREE.PlaneGeometry(0.25, straightLen);
+    vLineGeo.rotateX(-Math.PI / 2);
 
-    const lineW = 0.28;
-    const rubberW = 3.5;
+    // South Straight Outer Line (z = -half - w/2 + 0.25)
+    const southOuter = new THREE.Mesh(hLineGeo, whiteLineMat);
+    southOuter.position.set(0, 0.009, -half - w / 2 + 0.25);
+    linesGroup.add(southOuter);
 
-    for (let i = 0; i < numPts; i++) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const dx = nextPt.x - pt.x;
-      const dz = nextPt.z - pt.z;
-      const segLen = Math.hypot(dx, dz) || 1.0;
-      const nx = -dz / segLen;
-      const nz = dx / segLen;
+    // North Straight Inner & Outer Lines
+    const northOuter = new THREE.Mesh(hLineGeo, whiteLineMat);
+    northOuter.position.set(0, 0.009, half + w / 2 - 0.25);
+    linesGroup.add(northOuter);
+    const northInner = new THREE.Mesh(hLineGeo, whiteLineMat);
+    northInner.position.set(0, 0.009, half - w / 2 + 0.25);
+    linesGroup.add(northInner);
 
-      // Outer Left Boundary Ribbon (0.28m width)
-      const leftOuterX = pt.x + nx * (halfW - 0.05);
-      const leftOuterZ = pt.z + nz * (halfW - 0.05);
-      const leftInnerX = pt.x + nx * (halfW - 0.05 - lineW);
-      const leftInnerZ = pt.z + nz * (halfW - 0.05 - lineW);
-      leftLinePos.push(leftOuterX, 0.048, leftOuterZ);
-      leftLinePos.push(leftInnerX, 0.048, leftInnerZ);
+    // East Straight Inner & Outer Lines
+    const eastOuter = new THREE.Mesh(vLineGeo, whiteLineMat);
+    eastOuter.position.set(half + w / 2 - 0.25, 0.009, 0);
+    linesGroup.add(eastOuter);
+    const eastInner = new THREE.Mesh(vLineGeo, whiteLineMat);
+    eastInner.position.set(half - w / 2 + 0.25, 0.009, 0);
+    linesGroup.add(eastInner);
 
-      // Outer Right Boundary Ribbon (0.28m width)
-      const rightOuterX = pt.x - nx * (halfW - 0.05);
-      const rightOuterZ = pt.z - nz * (halfW - 0.05);
-      const rightInnerX = pt.x - nx * (halfW - 0.05 - lineW);
-      const rightInnerZ = pt.z - nz * (halfW - 0.05 - lineW);
-      rightLinePos.push(rightOuterX, 0.048, rightOuterZ);
-      rightLinePos.push(rightInnerX, 0.048, rightInnerZ);
+    // West Straight Inner & Outer Lines
+    const westOuter = new THREE.Mesh(vLineGeo, whiteLineMat);
+    westOuter.position.set(-half - w / 2 + 0.25, 0.009, 0);
+    linesGroup.add(westOuter);
+    const westInner = new THREE.Mesh(vLineGeo, whiteLineMat);
+    westInner.position.set(-half + w / 2 - 0.25, 0.009, 0);
+    linesGroup.add(westInner);
 
-      // Dark Racing Rubber Groove along trajectory
-      const rubLX = pt.x + nx * (rubberW / 2);
-      const rubLZ = pt.z + nz * (rubberW / 2);
-      const rubRX = pt.x - nx * (rubberW / 2);
-      const rubRZ = pt.z - nz * (rubberW / 2);
-      rubberPos.push(rubLX, 0.044, rubLZ);
-      rubberPos.push(rubRX, 0.044, rubRZ);
+    // --- B. 100% UNBROKEN RACING DASHED CENTERLINES (STRAIGHTS + ALL 4 CURVES) ---
+    // 3.2m dash length, 4.8m gap (8.0m continuous cycle). Seamlessly loops around the entire circuit!
+    const dashHGeo = new THREE.PlaneGeometry(3.2, 0.25);
+    dashHGeo.rotateX(-Math.PI / 2);
+    const dashVGeo = new THREE.PlaneGeometry(0.25, 3.2);
+    dashVGeo.rotateX(-Math.PI / 2);
 
-      const nextI = (i + 1) % numPts;
-      const i0 = i * 2;
-      const i1 = i * 2 + 1;
-      const i2 = nextI * 2;
-      const i3 = nextI * 2 + 1;
-
-      leftLineIdx.push(i0, i1, i2, i1, i3, i2);
-      rightLineIdx.push(i0, i1, i2, i1, i3, i2);
-      rubberIdx.push(i0, i1, i2, i1, i3, i2);
-    }
-
-    const leftLineGeo = new THREE.BufferGeometry();
-    leftLineGeo.setAttribute('position', new THREE.Float32BufferAttribute(leftLinePos, 3));
-    leftLineGeo.setIndex(leftLineIdx);
-    linesGroup.add(new THREE.Mesh(leftLineGeo, whiteLineMat));
-
-    const rightLineGeo = new THREE.BufferGeometry();
-    rightLineGeo.setAttribute('position', new THREE.Float32BufferAttribute(rightLinePos, 3));
-    rightLineGeo.setIndex(rightLineIdx);
-    linesGroup.add(new THREE.Mesh(rightLineGeo, whiteLineMat));
-
-    const rubberGeo = new THREE.BufferGeometry();
-    rubberGeo.setAttribute('position', new THREE.Float32BufferAttribute(rubberPos, 3));
-    rubberGeo.setIndex(rubberIdx);
-    linesGroup.add(new THREE.Mesh(rubberGeo, rubberMat));
-
-    // --- B. UNBROKEN RACING DASHED CENTERLINE ---
-    const dashGeo = new THREE.PlaneGeometry(3.2, 0.25);
-    dashGeo.rotateX(-Math.PI / 2);
-
-    for (let i = 0; i < numPts; i += 3) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const dx = nextPt.x - pt.x;
-      const dz = nextPt.z - pt.z;
-      const angle = Math.atan2(dx, dz);
-
-      const dash = new THREE.Mesh(dashGeo, whiteLineMat);
-      dash.position.set(pt.x, 0.048, pt.z);
-      dash.rotation.y = angle - Math.PI / 2;
+    // 1. South Straight (z = -half = -130, full 184m)
+    for (let x = -c + 4; x <= c - 4; x += 8) {
+      const dash = new THREE.Mesh(dashHGeo, whiteLineMat);
+      dash.position.set(x, 0.010, -half);
       linesGroup.add(dash);
     }
 
-    // --- C. PIT LANE & PIT ENTRY MARKINGS ---
-    // Pit Lane Fast Lane Solid White Boundary Lines
+    // 2. East Straight (x = half = 130, full 184m)
+    for (let z = -c + 4; z <= c - 4; z += 8) {
+      const dash = new THREE.Mesh(dashVGeo, whiteLineMat);
+      dash.position.set(half, 0.010, z);
+      linesGroup.add(dash);
+    }
+
+    // 3. North Straight (z = half = 130, full 184m)
+    for (let x = -c + 4; x <= c - 4; x += 8) {
+      const dash = new THREE.Mesh(dashHGeo, whiteLineMat);
+      dash.position.set(x, 0.010, half);
+      linesGroup.add(dash);
+    }
+
+    // 4. West Straight (x = -half = -130, full 184m)
+    for (let z = -c + 4; z <= c - 4; z += 8) {
+      const dash = new THREE.Mesh(dashVGeo, whiteLineMat);
+      dash.position.set(-half, 0.010, z);
+      linesGroup.add(dash);
+    }
+
+    // 5. Four Rounded Corners (Turn 1, Turn 2, Turn 3, Turn 4)
+    // Continuous dashed line along the corner center apex arc (R = 38m)
+    const cornerConfigs = [
+      { cx: c, cz: -c, startA: -Math.PI / 2 }, // Turn 1: South-East
+      { cx: c, cz: c, startA: 0 },             // Turn 2: North-East
+      { cx: -c, cz: c, startA: Math.PI / 2 },  // Turn 3: North-West
+      { cx: -c, cz: -c, startA: Math.PI },     // Turn 4: South-West
+    ];
+
+    cornerConfigs.forEach((cfg) => {
+      // 7 curved dashes per corner matching the 8.0m cycle exactly
+      for (let k = 0; k < 7; k++) {
+        const t = (k + 0.5) / 7;
+        const angle = cfg.startA + t * (Math.PI / 2);
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+
+        const dash = new THREE.Mesh(dashHGeo, whiteLineMat);
+        dash.position.set(cfg.cx + cosA * this.cornerRadius, 0.010, cfg.cz + sinA * this.cornerRadius);
+        dash.rotation.y = -angle - Math.PI / 2;
+        linesGroup.add(dash);
+      }
+
+      // Continuous Inner & Outer White Border Lines in this corner
+      const innerR = this.cornerRadius - w / 2;
+      const outerR = this.cornerRadius + w / 2;
+      const innerLine = this.createCornerRoadMesh(
+        cfg.cx,
+        cfg.cz,
+        innerR + 0.05,
+        innerR + 0.30,
+        cfg.startA,
+        cfg.startA + Math.PI / 2,
+        24,
+        whiteLineMat,
+        0.009
+      );
+      linesGroup.add(innerLine);
+
+      const outerLine = this.createCornerRoadMesh(
+        cfg.cx,
+        cfg.cz,
+        outerR - 0.30,
+        outerR - 0.05,
+        cfg.startA,
+        cfg.startA + Math.PI / 2,
+        24,
+        whiteLineMat,
+        0.009
+      );
+      linesGroup.add(outerLine);
+
+      // Continuous Racing Rubber Line through this corner
+      const cornerRubber = this.createCornerRoadMesh(
+        cfg.cx,
+        cfg.cz,
+        this.cornerRadius - 2.5,
+        this.cornerRadius + 2.5,
+        cfg.startA,
+        cfg.startA + Math.PI / 2,
+        24,
+        rubberMat,
+        0.007
+      );
+      linesGroup.add(cornerRubber);
+    });
+
+    // --- C. DARK GLOSSY RACING RUBBER LINE (Trazada de caucho pulido de F1) ---
+    const rubberHGeo = new THREE.PlaneGeometry(straightLen, 5.0);
+    rubberHGeo.rotateX(-Math.PI / 2);
+    const rubberVGeo = new THREE.PlaneGeometry(5.0, straightLen);
+    rubberVGeo.rotateX(-Math.PI / 2);
+
+    const northRubber = new THREE.Mesh(rubberHGeo, rubberMat);
+    northRubber.position.set(0, 0.007, half - 1.2);
+    linesGroup.add(northRubber);
+
+    const eastRubber = new THREE.Mesh(rubberVGeo, rubberMat);
+    eastRubber.position.set(half - 1.2, 0.007, 0);
+    linesGroup.add(eastRubber);
+
+    const westRubber = new THREE.Mesh(rubberVGeo, rubberMat);
+    westRubber.position.set(-half + 1.2, 0.007, 0);
+    linesGroup.add(westRubber);
+
+    const southRubber = new THREE.Mesh(rubberHGeo, rubberMat);
+    southRubber.position.set(0, 0.007, -half + 1.2);
+    linesGroup.add(southRubber);
+
+    // --- D. PIT LANE & PIT ENTRY MARKINGS ---
+    // 1. South Straight Inner Track Limit Solid White Line (z = -122)
+    const lineWestGeo = new THREE.PlaneGeometry(24, 0.3);
+    lineWestGeo.rotateX(-Math.PI / 2);
+    const lineWest = new THREE.Mesh(lineWestGeo, whiteLineMat);
+    lineWest.position.set(-80, 0.010, -122);
+    linesGroup.add(lineWest);
+
+    const lineEastGeo = new THREE.PlaneGeometry(88, 0.3);
+    lineEastGeo.rotateX(-Math.PI / 2);
+    const lineEast = new THREE.Mesh(lineEastGeo, whiteLineMat);
+    lineEast.position.set(4, 0.010, -122);
+    linesGroup.add(lineEast);
+
+    // 2. Pit Entry Deceleration Solid White Boundary Line (Curving into pit lane)
+    const pitEntryLinePoints = [];
+    for (let p = 0; p <= 20; p++) {
+      const t = p / 20;
+      const lx = -72 + t * 24;
+      const lz = -122 + (1 - Math.cos(t * Math.PI)) * 0.5 * 5.8;
+      pitEntryLinePoints.push(new THREE.Vector3(lx, 0.012, lz));
+    }
+    for (let p = 0; p < pitEntryLinePoints.length - 1; p++) {
+      const p1 = pitEntryLinePoints[p];
+      const p2 = pitEntryLinePoints[p + 1];
+      const segLen = p1.distanceTo(p2);
+      const segGeo = new THREE.PlaneGeometry(segLen, 0.3);
+      segGeo.rotateX(-Math.PI / 2);
+      const segMesh = new THREE.Mesh(segGeo, whiteLineMat);
+      segMesh.position.set((p1.x + p2.x) / 2, 0.012, (p1.z + p2.z) / 2);
+      segMesh.rotation.y = -Math.atan2(p2.z - p1.z, p2.x - p1.x);
+      linesGroup.add(segMesh);
+    }
+
+    // 3. Pit Entry Dashed Commitment Line along Main Straight
+    for (let d = 0; d < 8; d++) {
+      const dashGeo = new THREE.PlaneGeometry(1.5, 0.3);
+      dashGeo.rotateX(-Math.PI / 2);
+      const dash = new THREE.Mesh(dashGeo, whiteLineMat);
+      dash.position.set(-70 + d * 3.0, 0.010, -122);
+      linesGroup.add(dash);
+    }
+
+    // 4. Pit Lane Fast Lane Solid White Boundary Lines
     const pitInnerLineGeo = new THREE.PlaneGeometry(96, 0.25);
     pitInnerLineGeo.rotateX(-Math.PI / 2);
     const pitInnerLine = new THREE.Mesh(pitInnerLineGeo, whiteLineMat);
-    pitInnerLine.position.set(-10, 0.048, -113.2);
+    pitInnerLine.position.set(0, 0.010, -113.2);
     linesGroup.add(pitInnerLine);
 
     const pitOuterLineGeo = new THREE.PlaneGeometry(96, 0.25);
     pitOuterLineGeo.rotateX(-Math.PI / 2);
     const pitOuterLine = new THREE.Mesh(pitOuterLineGeo, whiteLineMat);
-    pitOuterLine.position.set(-10, 0.048, -120.4);
+    pitOuterLine.position.set(0, 0.010, -120.4);
     linesGroup.add(pitOuterLine);
 
-    // Pit Lane Center Dashed Guidance Line
+    // 5. Pit Lane Center Dashed Guidance Line
     for (let pd = 0; pd < 24; pd++) {
       const pDashGeo = new THREE.PlaneGeometry(2.0, 0.2);
       pDashGeo.rotateX(-Math.PI / 2);
       const pDash = new THREE.Mesh(pDashGeo, yellowLineMat);
-      pDash.position.set(-54 + pd * 4.0, 0.048, -116.8);
+      pDash.position.set(-44 + pd * 4.0, 0.010, -116.8);
       linesGroup.add(pDash);
     }
 
@@ -1108,51 +1330,50 @@ export class TrackBuilder {
    */
   private buildKerbsAndStartingGrid(): void {
     const kerbGroup = new THREE.Group();
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
-    const halfW = this.trackWidth / 2;
-    const kerbWidth = 1.4;
+    const c = this.innerCornerCenter;
+    const w = this.trackWidth;
+    const innerR = this.cornerRadius - w / 2;
+    const outerR = this.cornerRadius + w / 2;
+    const kerbWidth = 1.6;
 
-    // Detect corner apexes where speedLimit is reduced or curvature is high
-    for (let i = 0; i < numPts; i++) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const prevPt = waypoints[(i - 1 + numPts) % numPts];
+    const corners = [
+      { cx: c, cz: -c, startAngle: -Math.PI / 2 },
+      { cx: c, cz: c, startAngle: 0 },
+      { cx: -c, cz: c, startAngle: Math.PI / 2 },
+      { cx: -c, cz: -c, startAngle: Math.PI },
+    ];
 
-      // Curvature angle between prev->current and current->next
-      const v1x = pt.x - prevPt.x;
-      const v1z = pt.z - prevPt.z;
-      const v2x = nextPt.x - pt.x;
-      const v2z = nextPt.z - pt.z;
-      const cross = v1x * v2z - v1z * v2x; // Positive = turn left, Negative = turn right
+    corners.forEach((corner) => {
+      const stepAngle = (Math.PI / 2) / 18;
+      for (let i = 0; i < 18; i++) {
+        const mat = i % 2 === 0 ? this.kerbRedMat : this.kerbWhiteMat;
+        const angle = corner.startAngle + (i + 0.5) * stepAngle;
 
-      const isCornering = Math.abs(cross) > 0.35 || pt.speedLimitKmh < 270;
-      if (!isCornering) continue;
+        // Inner Apex Curb
+        const kGeo = new THREE.BoxGeometry(kerbWidth, 0.10, (innerR * stepAngle) * 1.05);
+        const kMesh = new THREE.Mesh(kGeo, mat);
+        const kx = corner.cx + Math.cos(angle) * (innerR - kerbWidth / 2);
+        const kz = corner.cz + Math.sin(angle) * (innerR - kerbWidth / 2);
+        kMesh.position.set(kx, 0.05, kz);
+        kMesh.rotation.y = -angle;
+        kMesh.castShadow = true;
+        kerbGroup.add(kMesh);
 
-      const segLen = Math.hypot(v2x, v2z) || 1.0;
-      const nx = -v2z / segLen;
-      const nz = v2x / segLen;
-      const angle = Math.atan2(v2x, v2z);
+        // Outer Exit Curb (Exit phase of corner)
+        if (i > 8) {
+          const okGeo = new THREE.BoxGeometry(kerbWidth, 0.10, (outerR * stepAngle) * 1.05);
+          const okMesh = new THREE.Mesh(okGeo, mat);
+          const okx = corner.cx + Math.cos(angle) * (outerR + kerbWidth / 2);
+          const okz = corner.cz + Math.sin(angle) * (outerR + kerbWidth / 2);
+          okMesh.position.set(okx, 0.05, okz);
+          okMesh.rotation.y = -angle;
+          okMesh.castShadow = true;
+          kerbGroup.add(okMesh);
+        }
+      }
+    });
 
-      const mat = i % 2 === 0 ? this.kerbRedMat : this.kerbWhiteMat;
-
-      // Inside apex kerb: if turning left (cross > 0), place on left; if turning right (cross < 0), place on right
-      const isLeftTurn = cross > 0;
-      const kerbSide = isLeftTurn ? 1 : -1;
-
-      const kx = pt.x + nx * kerbSide * (halfW + kerbWidth / 2);
-      const kz = pt.z + nz * kerbSide * (halfW + kerbWidth / 2);
-
-      const kGeo = new THREE.BoxGeometry(kerbWidth, 0.08, segLen * 1.08);
-      const kMesh = new THREE.Mesh(kGeo, mat);
-      kMesh.position.set(kx, 0.075, kz);
-      kMesh.rotation.y = angle;
-      kMesh.castShadow = true;
-      kMesh.receiveShadow = true;
-      kerbGroup.add(kMesh);
-    }
-
-    // Checkered Start / Finish Line at S/F Gantry (0, -130)
+    // Checkered Start / Finish Line
     const sfGeo = new THREE.PlaneGeometry(16, 2.5);
     sfGeo.rotateX(-Math.PI / 2);
     const canvas = document.createElement('canvas');
@@ -1178,11 +1399,11 @@ export class TrackBuilder {
       polygonOffsetUnits: -4.0,
     });
     const sfMesh = new THREE.Mesh(sfGeo, sfMat);
-    sfMesh.position.set(0, 0.048, -130);
+    sfMesh.position.set(0, 0.012, -this.halfSize);
     sfMesh.renderOrder = 2;
     kerbGroup.add(sfMesh);
 
-    // Starting Grid Boxes (8 grid slots alternating on main straight)
+    // Starting Grid Boxes (8 grid slots)
     for (let g = 0; g < 4; g++) {
       [-2.4, 2.4].forEach((offsetZ, sideIdx) => {
         const boxGeo = new THREE.PlaneGeometry(4.8, 2.2);
@@ -1195,7 +1416,7 @@ export class TrackBuilder {
           polygonOffsetUnits: -4.0,
         });
         const boxMesh = new THREE.Mesh(boxGeo, boxMat);
-        boxMesh.position.set(-18 - g * 12 + sideIdx * 5, 0.048, -130 + offsetZ);
+        boxMesh.position.set(-15 - g * 12 + sideIdx * 5, 0.015, -this.halfSize + offsetZ);
         boxMesh.renderOrder = 2;
         kerbGroup.add(boxMesh);
       });
@@ -1206,14 +1427,20 @@ export class TrackBuilder {
 
   /**
    * FIA Concrete Safety Barriers with Overhead Curved Steel Debris Catch Fencing
-   * Surrounds the complete F1 Grand Prix circuit perimeter and registers static obstacle physics
+   * High-Performance Batched & Instanced Rendering (Reduces 700+ draw calls to 4 draw calls!)
    */
   private buildConcreteBarriersWithCatchFences(): void {
     const wallHeight = 1.20;
     const wallThick = 0.75;
     const fenceHeight = 2.40;
-    const halfW = this.trackWidth / 2;
+    const half = this.halfSize;
+    const w = this.trackWidth;
+    const c = this.innerCornerCenter;
 
+    const outerHalf = half + w / 2 + 2.0;
+    const innerHalf = half - w / 2 - 2.0;
+
+    // Shared material & geometry
     const sharedRailMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, metalness: 0.7, roughness: 0.3 });
     const sharedPostGeo = new THREE.CylinderGeometry(0.06, 0.07, fenceHeight, 6);
 
@@ -1225,7 +1452,6 @@ export class TrackBuilder {
 
     const makeWallWithFence = (x1: number, z1: number, x2: number, z2: number, hasFence: boolean = true) => {
       const length = Math.hypot(x2 - x1, z2 - z1);
-      if (length < 0.5) return;
       const angle = Math.atan2(x2 - x1, z2 - z1);
       const midX = (x1 + x2) / 2;
       const midZ = (z1 + z2) / 2;
@@ -1242,9 +1468,9 @@ export class TrackBuilder {
       railGeo.translate(midX, wallHeight + 0.08, midZ);
       railGeos.push(railGeo);
 
-      // FIA Catch Fencing
-      if (hasFence && length > 5) {
-        const postCount = Math.max(2, Math.floor(length / 6));
+      // FIA Catch Fencing (Curved Steel Posts + Wire Cables)
+      if (hasFence && length > 6) {
+        const postCount = Math.max(2, Math.floor(length / 5));
         for (let p = 0; p <= postCount; p++) {
           const t = p / postCount;
           const px = x1 + (x2 - x1) * t;
@@ -1278,58 +1504,47 @@ export class TrackBuilder {
       });
     };
 
-    // 1. Perimeter Walls along both sides of F1 Grand Prix Spline
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
-    const wallOffset = halfW + 3.2;
+    // Straight Outer Walls with Catch Fencing
+    makeWallWithFence(-c, -outerHalf, c, -outerHalf, true);
+    makeWallWithFence(-c, outerHalf, c, outerHalf, true);
+    makeWallWithFence(outerHalf, -c, outerHalf, c, true);
+    makeWallWithFence(-outerHalf, -c, -outerHalf, c, true);
 
-    // Step around waypoints in intervals of 4 nodes (~12m segments)
-    const step = 4;
-    for (let i = 0; i < numPts; i += step) {
-      const nextI = (i + step) % numPts;
-      const pt1 = waypoints[i];
-      const pt2 = waypoints[nextI];
-
-      // Normals for pt1 and pt2
-      const fwd1 = waypoints[(i + 1) % numPts];
-      const dx1 = fwd1.x - pt1.x;
-      const dz1 = fwd1.z - pt1.z;
-      const len1 = Math.hypot(dx1, dz1) || 1;
-      const nx1 = -dz1 / len1;
-      const nz1 = dx1 / len1;
-
-      const fwd2 = waypoints[(nextI + 1) % numPts];
-      const dx2 = fwd2.x - pt2.x;
-      const dz2 = fwd2.z - pt2.z;
-      const len2 = Math.hypot(dx2, dz2) || 1;
-      const nx2 = -dz2 / len2;
-      const nz2 = dx2 / len2;
-
-      // Outer Left Barrier Segment
-      const left1X = pt1.x + nx1 * wallOffset;
-      const left1Z = pt1.z + nz1 * wallOffset;
-      const left2X = pt2.x + nx2 * wallOffset;
-      const left2Z = pt2.z + nz2 * wallOffset;
-      makeWallWithFence(left1X, left1Z, left2X, left2Z, true);
-
-      // Outer Right Barrier Segment (except along pit lane area on main straight)
-      const isPitArea = pt1.z < -100 && pt1.x > -65 && pt1.x < 55;
-      if (!isPitArea) {
-        const right1X = pt1.x - nx1 * wallOffset;
-        const right1Z = pt1.z - nz1 * wallOffset;
-        const right2X = pt2.x - nx2 * wallOffset;
-        const right2Z = pt2.z - nz2 * wallOffset;
-        makeWallWithFence(right1X, right1Z, right2X, right2Z, true);
-      }
-    }
-
-    // 2. Pit Wall separating main track and pit lane on South straight
+    // Pit Wall separating main track and pit lane on South straight
     makeWallWithFence(-48, -122.0, 44, -122.0, false);
 
-    // 3. Infield Back Wall behind Pit Garages
-    makeWallWithFence(-65, -105.8, 50, -105.8, false);
+    // Infield Back Wall behind Pit Garages
+    makeWallWithFence(-c, -105.8, c, -105.8, false);
 
-    // Merge and instantiate all walls and fences
+    // 3 Straight Inner Walls (North, East, West)
+    makeWallWithFence(-c, innerHalf, c, innerHalf, true);
+    makeWallWithFence(innerHalf, -c, innerHalf, c, true);
+    makeWallWithFence(-innerHalf, -c, -innerHalf, c, true);
+
+    // Rounded Corner Outer Barrier Walls
+    const corners = [
+      { cx: c, cz: -c, start: -Math.PI / 2 },
+      { cx: c, cz: c, start: 0 },
+      { cx: -c, cz: c, start: Math.PI / 2 },
+      { cx: -c, cz: -c, start: Math.PI },
+    ];
+
+    const outerR = this.cornerRadius + w / 2 + 2.0;
+    corners.forEach((corn) => {
+      const segs = 6;
+      const step = (Math.PI / 2) / segs;
+      for (let s = 0; s < segs; s++) {
+        const a1 = corn.start + s * step;
+        const a2 = corn.start + (s + 1) * step;
+        const x1 = corn.cx + Math.cos(a1) * outerR;
+        const z1 = corn.cz + Math.sin(a1) * outerR;
+        const x2 = corn.cx + Math.cos(a2) * outerR;
+        const z2 = corn.cz + Math.sin(a2) * outerR;
+        makeWallWithFence(x1, z1, x2, z2, true);
+      }
+    });
+
+    // Merge and instantiate all walls and fences in 4 draw calls total!
     if (wallGeos.length > 0) {
       const mergedWallGeo = BufferGeometryUtils.mergeGeometries(wallGeos, false);
       const wallMesh = new THREE.Mesh(mergedWallGeo, this.concreteBarrierMat);
@@ -1369,34 +1584,29 @@ export class TrackBuilder {
    */
   private buildTecproRunoffZones(): void {
     const tecproGroup = new THREE.Group();
+    const c = this.innerCornerCenter;
+    const w = this.trackWidth;
+    const outerR = this.cornerRadius + w / 2 + 1.2;
 
-    // High-impact runoff positions at key braking zones
-    const runoffAreas = [
-      // Turn 1 Chicane Runoff (x: 130, z: -140)
-      { startX: 110, startZ: -142, endX: 155, endZ: -130, blocks: 12 },
-      // Turn 8 Slow Hairpin Heavy Braking Runoff (x: -55..-95, z: 232)
-      { startX: -45, startZ: 232, endX: -95, endZ: 228, blocks: 14 },
-      // Turn 9 130R Curvone Runoff (x: -115, z: -115..-85)
-      { startX: -114, startZ: -80, endX: -108, endZ: -118, blocks: 10 },
-      // Turn 10 Bus Stop Chicane Runoff (x: -90..-65, z: -140)
-      { startX: -92, startZ: -140, endX: -65, endZ: -138, blocks: 8 },
+    const corners = [
+      { cx: c, cz: -c, start: -Math.PI / 2 },
+      { cx: c, cz: c, start: 0 },
+      { cx: -c, cz: c, start: Math.PI / 2 },
+      { cx: -c, cz: -c, start: Math.PI },
     ];
 
-    runoffAreas.forEach((area) => {
-      const dx = area.endX - area.startX;
-      const dz = area.endZ - area.startZ;
-      const angle = Math.atan2(dx, dz);
-
-      for (let b = 0; b < area.blocks; b++) {
-        const t = (b + 0.5) / area.blocks;
-        const bx = area.startX + dx * t;
-        const bz = area.startZ + dz * t;
+    corners.forEach((corn) => {
+      // 8 Tecpro blocks lining the high-impact zone of each corner runoff
+      for (let b = 0; b < 8; b++) {
+        const angle = corn.start + (b + 0.5) * ((Math.PI / 2) / 8);
+        const bx = corn.cx + Math.cos(angle) * (outerR + 0.8);
+        const bz = corn.cz + Math.sin(angle) * (outerR + 0.8);
 
         const blockGeo = new THREE.BoxGeometry(0.85, 1.1, 1.8);
         const mat = b % 2 === 0 ? this.tecproRedMat : this.tecproWhiteMat;
         const block = new THREE.Mesh(blockGeo, mat);
         block.position.set(bx, 0.55, bz);
-        block.rotation.y = angle;
+        block.rotation.y = -angle;
         block.receiveShadow = true;
         tecproGroup.add(block);
       }
@@ -1407,17 +1617,14 @@ export class TrackBuilder {
 
   /**
    * FIA Marshal Posts with Elevated Viewing Platforms, Flags, and Digital LED Signal Boards
-   * Situated safely behind the FIA barrier walls around the Grand Prix circuit
    */
   private buildMarshalSafetyPosts(): void {
     const marshalGroup = new THREE.Group();
     const postLocations = [
-      { x: 80, z: -148, rot: 0, sector: 'S1' },
-      { x: 200, z: 25, rot: -Math.PI / 2, sector: 'S1' },
-      { x: 85, z: 220, rot: Math.PI, sector: 'S2' },
-      { x: -115, z: 225, rot: Math.PI / 2, sector: 'S2' },
-      { x: -116, z: 10, rot: Math.PI / 2, sector: 'S3' },
-      { x: -115, z: -100, rot: Math.PI / 2, sector: 'S3' },
+      { x: 92, z: -145, rot: 0, sector: 'S1' },
+      { x: 145, z: 92, rot: Math.PI / 2, sector: 'S2' },
+      { x: -92, z: 145, rot: Math.PI, sector: 'S3' },
+      { x: -145, z: -92, rot: -Math.PI / 2, sector: 'S4' },
     ];
 
     postLocations.forEach((loc) => {
@@ -2236,33 +2443,33 @@ export class TrackBuilder {
       structGroup.add(lightMesh);
     }
 
-    // 2. West High-Tech Sponsor Arch Bridge (38m span across Kemmel-Baku Super Straight at x = -100, z = 20)
+    // 2. West High-Tech Sponsor Arch Bridge (38m span across West Straight)
     const archSpan = 38;
     const archH = 8.8;
     const archMeshGeo = new THREE.BoxGeometry(archSpan, 2.4, 4.8);
     const archMesh = new THREE.Mesh(archMeshGeo, this.overheadTrussMat);
-    archMesh.position.set(-100, archH, 20);
+    archMesh.position.set(-this.halfSize, archH, 0);
     archMesh.castShadow = false;
     archMesh.receiveShadow = false;
     structGroup.add(archMesh);
 
-    // Realistic Integrated Ground Contact Shadow for West Arch Bridge
+    // Realistic Integrated Ground Contact Shadow for West Arch Bridge (Flush at y = 0.016 on tarmac, renderOrder 1)
     const archShadow = this.createOverheadSoftShadow(archSpan + 2.0, 8.4, 'arch', 0.65);
-    archShadow.position.set(-100 - 4.5, 0.016, 20 + 3.8);
+    archShadow.position.set(-this.halfSize - 4.5, 0.016, 3.8);
     structGroup.add(archShadow);
 
-    // Arch Support Pillars (Pillars placed safely behind the barrier walls at x = -118 and x = -82)
-    [-100 - archSpan / 2 + 0.8, -100 + archSpan / 2 - 0.8].forEach((xPos) => {
+    // Arch Support Pillars
+    [-this.halfSize - archSpan / 2 + 0.8, -this.halfSize + archSpan / 2 - 0.8].forEach((xPos) => {
       const pillarGeo = new THREE.CylinderGeometry(1.3, 1.5, archH, 12);
       const pillar = new THREE.Mesh(pillarGeo, this.overheadTrussMat);
-      pillar.position.set(xPos, archH / 2, 20);
+      pillar.position.set(xPos, archH / 2, 0);
       pillar.castShadow = false;
       pillar.receiveShadow = false;
       structGroup.add(pillar);
 
       this.staticObstacles.push({
         x: xPos,
-        z: 20,
+        z: 0,
         radius: 1.6,
         type: 'pillar',
       });
@@ -2272,47 +2479,60 @@ export class TrackBuilder {
   }
 
   /**
-   * 16 High-Mast Stadium Floodlight Towers Surrounding the Entire Circuit
-   * Every tower is positioned safely outside the outer barriers (dist > 15m)
-   * and aims directly at the racing track surface!
+   * 24 High-Mast Stadium Floodlight Towers Surrounding the Entire Circuit
+   * Every single tower is analyzed and rotated so the light head and spotlight bulbs
+   * pitch downward at a 35 degree angle pointing directly at the racing track surface!
    */
   private buildHighMastFloodlights(): void {
     const towerGroup = new THREE.Group();
 
-    // 16 Strategic Floodlight Tower positions with exact track target focal points
+    // 24 Strategic Floodlight Tower positions with exact track target focal points
     const floodlightConfigs = [
-      // S/F Straight & Pit Lane (Aiming North onto S/F straight)
-      { x: -65, z: -155, tx: -65, tz: -130 },
-      { x: -15, z: -155, tx: -15, tz: -130 },
-      { x: 35,  z: -155, tx: 35,  tz: -130 },
-      { x: 80,  z: -155, tx: 80,  tz: -130 },
+      // South Straight (Main Straight & Pit Lane) - Aiming North onto the track
+      { x: -75, z: -156, tx: -75, tz: -130 },
+      { x: -40, z: -156, tx: -40, tz: -130 },
+      { x: 0, z: -156, tx: 0, tz: -130 },
+      { x: 40, z: -156, tx: 40, tz: -130 },
+      { x: 75, z: -156, tx: 75, tz: -130 },
+      // South Infield Pit Tower - Aiming South onto Pit Lane & Track
+      { x: -10, z: -92, tx: -10, tz: -116 },
 
-      // Turn 1 Chicane & Exit
-      { x: 155, z: -145, tx: 130, tz: -120 },
-      { x: 165, z: -85,  tx: 145, tz: -82 },
+      // Turn 1 Corner Outer Towers (South-East) - Aiming at Turn 1 apex & exit
+      { x: 125, z: -156, tx: 110, tz: -125 },
+      { x: 156, z: -125, tx: 125, tz: -110 },
+      { x: 156, z: -80, tx: 130, tz: -80 },
 
-      // The Sweep (Turn 3)
-      { x: 205, z: 15,   tx: 184, tz: 25 },
-      { x: 195, z: 75,   tx: 172, tz: 70 },
+      // East Straight - Aiming West onto the track
+      { x: 156, z: -40, tx: 130, tz: -40 },
+      { x: 156, z: 0, tx: 130, tz: 0 },
+      { x: 156, z: 40, tx: 130, tz: 40 },
 
-      // The High-Speed Esses (Turn 4 to 7)
-      { x: 155, z: 145,  tx: 135, tz: 125 },
-      { x: 115, z: 185,  tx: 95,  tz: 160 },
-      { x: 55,  z: 220,  tx: 45,  tz: 195 },
-      { x: -15, z: 242,  tx: -15, tz: 218 },
+      // Turn 2 Corner Outer Towers (North-East) - Aiming at Turn 2 apex & exit
+      { x: 156, z: 80, tx: 130, tz: 80 },
+      { x: 156, z: 125, tx: 125, tz: 110 },
+      { x: 125, z: 156, tx: 110, tz: 125 },
 
-      // Turn 8 180° Slow Hairpin
-      { x: -115, z: 235, tx: -88, tz: 205 },
-      { x: -120, z: 175, tx: -96, tz: 180 },
+      // North Straight - Aiming South onto the track
+      { x: 75, z: 156, tx: 75, tz: 130 },
+      { x: 40, z: 156, tx: 40, tz: 130 },
+      { x: 0, z: 156, tx: 0, tz: 130 },
+      { x: -40, z: 156, tx: -40, tz: 130 },
+      { x: -75, z: 156, tx: -75, tz: 130 },
 
-      // Kemmel-Baku Super Straight
-      { x: -122, z: 70,  tx: -100, tz: 70 },
-      { x: -122, z: -10, tx: -100, tz: -10 },
-      { x: -122, z: -65, tx: -100, tz: -65 },
+      // Turn 3 Corner Outer Towers (North-West) - Aiming at Turn 3 apex & exit
+      { x: -125, z: 156, tx: -110, tz: 125 },
+      { x: -156, z: 125, tx: -125, tz: 110 },
+      { x: -156, z: 80, tx: -130, tz: 80 },
 
-      // Turn 9 130R Curvone & Bus Stop Chicane
-      { x: -118, z: -115, tx: -95, tz: -105 },
-      { x: -75,  z: -152, tx: -74, tz: -129 },
+      // West Straight - Aiming East onto the track
+      { x: -156, z: 40, tx: -130, tz: 40 },
+      { x: -156, z: 0, tx: -130, tz: 0 },
+      { x: -156, z: -40, tx: -130, tz: -40 },
+
+      // Turn 4 Corner Outer Towers (South-West) - Aiming at Turn 4 apex & entry
+      { x: -156, z: -80, tx: -130, tz: -80 },
+      { x: -156, z: -125, tx: -125, tz: -110 },
+      { x: -125, z: -156, tx: -110, tz: -125 },
     ];
 
     floodlightConfigs.forEach((cfg) => {
@@ -2601,11 +2821,18 @@ export class TrackBuilder {
   /**
    * Photorealistic Dual-Corridor Tree System rendered via Hardware InstancedMesh.
    * Reduces draw calls from ~7,200 down to exactly 7 Draw Calls (99.9% reduction!).
-   * Concentrates 100% of vegetation safely OUTSIDE the FIA barrier corridors,
-   * forming an immersive, tree-lined Grand Prix forest backdrop with ZERO intrusion onto the track.
+   * Concentrates 100% of vegetation directly along BOTH sides of the circuit walls,
+   * forming an immersive, tree-lined Grand Prix forest corridor at 60 FPS rock-solid.
    */
   private buildOrganicVegetation(): void {
     const vegGroup = new THREE.Group();
+    const c = this.innerCornerCenter; // 92
+    const cornerCenters = [
+      { cx: c, cz: -c },
+      { cx: c, cz: c },
+      { cx: -c, cz: c },
+      { cx: -c, cz: -c },
+    ];
 
     interface TreeInst {
       x: number;
@@ -2623,50 +2850,95 @@ export class TrackBuilder {
 
     /**
      * Strict spatial validation ensuring no tree canopy or trunk intersects:
-     * - F1 Grand Prix track surface (16m width = 8m half-width, barrier at 11.2m)
-     * - Zero branches or leaves can extend past the barrier wall into the track corridor
      * - Grandstands (South or North)
      * - Pit Lane, Paddock Club Garages, Team Transporters
      * - Helipad
+     * - Concrete barriers (walls) and catch fences
+     * - Asphalt track surface and kerbs
      * - Gravel runoff traps
      */
     const isTreeSafe = (x: number, z: number, canopyR: number): boolean => {
-      // 1. Distance to F1 track spline centerline
-      // Barrier is at 11.2m; canopy must be at least (14.5 + canopyR)m away from centerline!
-      const distToTrack = this.getDistanceToCircuitSpline(x, z);
-      if (distToTrack < 14.5 + canopyR) {
-        return false; // ZERO TREES OR CANOPIES ANYWHERE NEAR ROAD OR BARRIERS!
-      }
-
-      // 2. South Main Grandstand Exclusion Zone
-      if (x >= -78 - canopyR && x <= 78 + canopyR && z >= -175 - canopyR && z <= -138.0 + canopyR) {
+      // 1. South Main Grandstand Exclusion Zone (including canopy & VIP box)
+      if (x >= -72 - canopyR && x <= 72 + canopyR && z >= -170 - canopyR && z <= -138.0 + canopyR) {
         return false;
       }
 
-      // 3. North Grandstand Exclusion Zone
-      if (x >= -52 - canopyR && x <= 52 + canopyR && z >= 138.0 - canopyR && z <= 170 + canopyR) {
+      // 2. North Grandstand Exclusion Zone
+      if (x >= -50 - canopyR && x <= 50 + canopyR && z >= 139.0 - canopyR && z <= 165 + canopyR) {
         return false;
       }
 
-      // 4. Pit Lane, Paddock Garages & Team Transporters
-      if (x >= -85 - canopyR && x <= 65 + canopyR && z >= -132 - canopyR && z <= -80 + canopyR) {
+      // 3. Pit Lane & Paddock Building
+      if (x >= -60 - canopyR && x <= 54 + canopyR && z >= -124 - canopyR && z <= -93 + canopyR) {
         return false;
       }
 
-      // 5. Helipad (radius 20m around 30, 30)
-      if (Math.hypot(x - 30, z - 30) < 20 + canopyR) {
+      // 4. Team Transporters & Awnings
+      if (x >= -50 - canopyR && x <= 44 + canopyR && z >= -96 - canopyR && z <= -84 + canopyR) {
         return false;
       }
 
-      // 6. Gravel Runoff Traps
-      if (x >= 105 - canopyR && x <= 170 + canopyR && z >= -155 - canopyR && z <= -115 + canopyR) return false;
-      if (x >= -110 - canopyR && x <= -25 + canopyR && z >= 218 - canopyR && z <= 255 + canopyR) return false;
-      if (x >= -135 - canopyR && x <= -90 + canopyR && z >= -130 - canopyR && z <= -65 + canopyR) return false;
-      if (x >= -110 - canopyR && x <= -50 + canopyR && z >= -155 - canopyR && z <= -120 + canopyR) return false;
+      // 5. Helipad (radius 18m around 30, 30)
+      if (Math.hypot(x - 30, z - 30) < 18 + canopyR) {
+        return false;
+      }
 
-      // 7. Tree-to-tree crown overlap prevention (allows lush clustering without clipping)
+      // 6. Track Surface, Kerbs & Starting Grid
+      // Straight Tracks (120 to 140 from center line)
+      if (Math.abs(x) <= 92 && z >= -140.0 - canopyR && z <= -120.0 + canopyR) return false;
+      if (Math.abs(x) <= 92 && z >= 120.0 - canopyR && z <= 140.0 + canopyR) return false;
+      if (x >= 120.0 - canopyR && x <= 140.0 + canopyR && Math.abs(z) <= 92) return false;
+      if (x >= -140.0 - canopyR && x <= -120.0 + canopyR && Math.abs(z) <= 92) return false;
+
+      // Corner curved track & gravel traps
+      for (const cc of cornerCenters) {
+        const dx = x - cc.cx;
+        const dz = z - cc.cz;
+        const signX = Math.sign(cc.cx);
+        const signZ = Math.sign(cc.cz);
+        if (dx * signX >= -2 && dz * signZ >= -2) {
+          const dist = Math.hypot(dx, dz);
+          // Curved track + inner wall + gravel trap forbidden band (23.5m to 64.5m)
+          if (dist >= 23.5 && dist <= 64.5) {
+            return false;
+          }
+          // Inner apex tree canopy cannot extend past inner wall at 24.0m
+          if (dist < 23.5 && dist + canopyR * 0.35 > 23.8) {
+            return false;
+          }
+          // Outer curve tree canopy cannot extend into gravel runoff trap
+          if (dist > 64.5 && dist - canopyR * 0.35 < 64.0) {
+            return false;
+          }
+        }
+      }
+
+      // 7. Concrete Barrier Walls (wall thickness 0.75m + tree canopy radius + 0.45m clearance)
+      const wallClr = canopyR + 0.45;
+      if (Math.abs(x) <= 92) {
+        if (Math.abs(z - 140) < wallClr || Math.abs(z + 140) < wallClr) return false;
+        if (Math.abs(z - 120) < wallClr || Math.abs(z + 120) < wallClr) return false;
+      }
+      if (Math.abs(z) <= 92) {
+        if (Math.abs(x - 140) < wallClr || Math.abs(x + 140) < wallClr) return false;
+        if (Math.abs(x - 120) < wallClr || Math.abs(x + 120) < wallClr) return false;
+      }
+
+      for (const cc of cornerCenters) {
+        const dx = x - cc.cx;
+        const dz = z - cc.cz;
+        const signX = Math.sign(cc.cx);
+        const signZ = Math.sign(cc.cz);
+        if (dx * signX >= -2 && dz * signZ >= -2) {
+          const dist = Math.hypot(dx, dz);
+          if (Math.abs(dist - 48.0) < wallClr) return false;
+          if (Math.abs(dist - 24.0) < wallClr) return false;
+        }
+      }
+
+      // 8. Tree-to-tree crown overlap prevention (allows lush, organic canopy clustering)
       for (const pt of placedTrees) {
-        if (Math.hypot(x - pt.x, z - pt.z) < (canopyR + pt.r) * 0.42) {
+        if (Math.hypot(x - pt.x, z - pt.z) < (canopyR + pt.r) * 0.38) {
           return false;
         }
       }
@@ -2685,8 +2957,8 @@ export class TrackBuilder {
 
       placedTrees.push({ x, z, r: canopyR });
 
-      // Register physics collision obstacle for accessible infield trees
-      if (Math.abs(x) < 140 && Math.abs(z) < 180) {
+      // Physics optimization: only check collisions for trees in the accessible infield (not behind outer walls)
+      if (Math.abs(x) < 120 && Math.abs(z) < 120) {
         this.staticObstacles.push({
           x,
           z,
@@ -2697,80 +2969,199 @@ export class TrackBuilder {
     };
 
     // =========================================================================
-    // 1. DENSE MULTI-TIER OUTFIELD PERIMETER FOREST CORRIDORS (24m to 90m from track)
+    // CORRIDOR 1: OUTFIELD WALL TREE CORRIDOR (Hugging outer barriers & fences)
     // =========================================================================
-    const waypoints = SHARED_CIRCUIT_WAYPOINTS;
-    const numPts = waypoints.length;
 
-    // Follow the track outer perimeter and place tiered tree rows safely behind the barriers
-    for (let i = 0; i < numPts; i += 3) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const dx = nextPt.x - pt.x;
-      const dz = nextPt.z - pt.z;
-      const segLen = Math.hypot(dx, dz) || 1;
-      const nx = -dz / segLen;
-      const nz = dx / segLen;
-
-      // Tier 1: Outer Verge Tree Line (offset 24m - 30m)
-      const t1 = Math.abs(i) % 3 === 0 ? 'pine' : (Math.abs(i) % 3 === 1 ? 'oak' : 'cypress');
-      tryAddTree(pt.x + nx * 25.0, pt.z + nz * 25.0, t1, 1.4);
-
-      // Tier 2: Mid Forest Canopy (offset 36m - 48m)
-      const t2 = Math.abs(i) % 2 === 0 ? 'oak' : 'pine';
-      tryAddTree(pt.x + nx * 40.0, pt.z + nz * 40.0, t2, 1.55);
-
-      // Tier 3: Deep Forest Ridge (offset 55m - 80m)
-      const t3 = Math.abs(i) % 3 === 0 ? 'pine' : 'oak';
-      tryAddTree(pt.x + nx * 60.0, pt.z + nz * 60.0, t3, 1.65);
-      tryAddTree(pt.x + nx * 80.0, pt.z + nz * 80.0, 'pine', 1.75);
-
-      // Infield Forest Clusters (only on the inside where distance permits)
-      const tIn = Math.abs(i) % 2 === 0 ? 'cypress' : 'oak';
-      tryAddTree(pt.x - nx * 30.0, pt.z - nz * 30.0, tIn, 1.35);
-      tryAddTree(pt.x - nx * 50.0, pt.z - nz * 50.0, 'oak', 1.45);
+    // 1. South Outer Wall Corridor (Safely flanking the South Grandstand)
+    // West wing of South straight (x = -135 to -74, z = -148 to -162)
+    for (let x = -135; x <= -74; x += 11.0) {
+      const type = Math.abs(x) % 2 === 0 ? 'pine' : 'oak';
+      tryAddTree(x, -150 - (Math.abs(x * 5) % 6), type, 1.4);
+    }
+    // East wing of South straight (x = 74 to 135, z = -148 to -162)
+    for (let x = 74; x <= 135; x += 11.0) {
+      const type = Math.abs(x) % 2 === 0 ? 'oak' : 'pine';
+      tryAddTree(x, -150 - (Math.abs(x * 5) % 6), type, 1.4);
+    }
+    // Forest backdrop behind South Grandstand (z = -174 to -188, completely clear of canopy)
+    for (let x = -65; x <= 65; x += 13.0) {
+      tryAddTree(x, -178 - (Math.abs(x * 7) % 8), 'pine', 1.6);
     }
 
-    // =========================================================================
-    // 2. WIDE NATURAL FOREST BACKDROPS (Filling the outer perimeter landscape)
-    // =========================================================================
-    for (let gx = -240; gx <= 240; gx += 18.0) {
-      for (let gz = -210; gz <= 270; gz += 18.0) {
-        const type = Math.abs(gx + gz) % 3 === 0 ? 'pine' : (Math.abs(gx) % 2 === 0 ? 'oak' : 'cypress');
-        tryAddTree(gx + (Math.abs(gz * 7) % 6), gz + (Math.abs(gx * 5) % 6), type, 1.45);
+    // 2. North Outer Wall Corridor (Safely flanking the North Grandstand)
+    // West wing of North straight (x = -135 to -52, z = 149 to 162)
+    for (let x = -135; x <= -52; x += 11.0) {
+      const type = Math.abs(x) % 2 === 0 ? 'oak' : 'pine';
+      tryAddTree(x, 151 + (Math.abs(x * 5) % 6), type, 1.4);
+    }
+    // East wing of North straight (x = 52 to 135, z = 149 to 162)
+    for (let x = 52; x <= 135; x += 11.0) {
+      const type = Math.abs(x) % 2 === 0 ? 'pine' : 'oak';
+      tryAddTree(x, 151 + (Math.abs(x * 5) % 6), type, 1.4);
+    }
+    // Forest backdrop behind North Grandstand (z = 170 to 184)
+    for (let x = -44; x <= 44; x += 13.0) {
+      tryAddTree(x, 172 + (Math.abs(x * 7) % 8), 'oak', 1.55);
+    }
+
+    // 3. East Outer Wall Corridor (x ≈ 150 to 164, z = -120 to 120)
+    for (let z = -125; z <= 125; z += 11.5) {
+      const type = Math.abs(z) % 2 === 0 ? 'pine' : 'oak';
+      tryAddTree(152 + (Math.abs(z * 5) % 8), z, type, 1.4);
+    }
+
+    // 4. West Outer Wall Corridor (x ≈ -150 to -164, z = -120 to 120)
+    for (let z = -125; z <= 125; z += 11.5) {
+      const type = Math.abs(z) % 2 === 0 ? 'oak' : 'pine';
+      tryAddTree(-152 - (Math.abs(z * 5) % 8), z, type, 1.4);
+    }
+
+    // 5. 4 CORNER OUTER FOREST AMPHITHEATERS
+    // Dense 4-tier majestic forest amphitheater encircling all 4 corners behind gravel runoff traps!
+    const cornerAngles = [
+      { cx: c, cz: -c, startAng: -Math.PI / 2 },
+      { cx: c, cz: c, startAng: 0 },
+      { cx: -c, cz: c, startAng: Math.PI / 2 },
+      { cx: -c, cz: -c, startAng: Math.PI },
+    ];
+
+    cornerAngles.forEach(({ cx, cz, startAng }) => {
+      // Tier 1: Near forest edge (r = 66.5 to 73m, flanking the runoff barrier)
+      for (let a = 0.05; a < Math.PI / 2 - 0.05; a += 0.075) {
+        const ang = startAng + a;
+        const dist = 67.5 + ((a * 7) % 4.5);
+        const type = Math.floor(a * 10) % 2 === 0 ? 'pine' : 'oak';
+        tryAddTree(cx + Math.cos(ang) * dist, cz + Math.sin(ang) * dist, type, 1.4);
       }
+
+      // Tier 2: Mid forest canopy (r = 75 to 84m)
+      for (let a = 0.04; a < Math.PI / 2 - 0.04; a += 0.065) {
+        const ang = startAng + a;
+        const dist = 77.5 + ((a * 9) % 5.0);
+        const type = Math.floor(a * 10) % 3 === 0 ? 'pine' : 'oak';
+        tryAddTree(cx + Math.cos(ang) * dist, cz + Math.sin(ang) * dist, type, 1.5);
+      }
+
+      // Tier 3: Deep perimeter forest backdrop (r = 86 to 96m)
+      for (let a = 0.035; a < Math.PI / 2 - 0.035; a += 0.055) {
+        const ang = startAng + a;
+        const dist = 89.0 + ((a * 11) % 6.0);
+        const type = Math.floor(a * 10) % 2 === 0 ? 'pine' : 'oak';
+        tryAddTree(cx + Math.cos(ang) * dist, cz + Math.sin(ang) * dist, type, 1.55);
+      }
+
+      // Tier 4: Dense outer perimeter boundary ridge (r = 98 to 110m)
+      for (let a = 0.03; a < Math.PI / 2 - 0.03; a += 0.050) {
+        const ang = startAng + a;
+        const dist = 101.0 + ((a * 13) % 7.0);
+        const type = Math.floor(a * 10) % 3 === 0 ? 'oak' : 'pine';
+        tryAddTree(cx + Math.cos(ang) * dist, cz + Math.sin(ang) * dist, type, 1.65);
+      }
+    });
+
+    // =========================================================================
+    // CORRIDOR 2: INFIELD WALL TREE CORRIDOR (Hugging inner circuit barriers)
+    // =========================================================================
+
+    // 1. North Inner Barrier Corridor (z ≈ 110 to 113, facing the track)
+    for (let x = -80; x <= 80; x += 12.0) {
+      const mod = Math.abs(x) % 3;
+      const type = mod === 0 ? 'cypress' : (mod === 1 ? 'oak' : 'pine');
+      tryAddTree(x, 111.5 - (Math.abs(x * 3) % 2), type, 1.25);
     }
 
-    // =========================================================================
-    // 3. TRACKSIDE SHRUB HEDGES (Strictly clear of walls, track, and barriers)
-    // =========================================================================
-    for (let i = 0; i < numPts; i += 2) {
-      const pt = waypoints[i];
-      const nextPt = waypoints[(i + 1) % numPts];
-      const dx = nextPt.x - pt.x;
-      const dz = nextPt.z - pt.z;
-      const segLen = Math.hypot(dx, dz) || 1;
-      const nx = -dz / segLen;
-      const nz = dx / segLen;
+    // 2. East Inner Barrier Corridor (x ≈ 110 to 113, facing the track)
+    for (let z = -80; z <= 80; z += 12.0) {
+      const mod = Math.abs(z) % 3;
+      const type = mod === 0 ? 'cypress' : (mod === 1 ? 'pine' : 'oak');
+      tryAddTree(111.5 - (Math.abs(z * 3) % 2), z, type, 1.25);
+    }
 
-      // Outer and Inner Shrub line (offset 18.0m)
-      const bx = pt.x + nx * 18.0;
-      const bz = pt.z + nz * 18.0;
-      const bushR = 1.2;
+    // 3. West Inner Barrier Corridor (x ≈ -110 to -113, facing the track)
+    for (let z = -80; z <= 80; z += 12.0) {
+      const mod = Math.abs(z) % 3;
+      const type = mod === 0 ? 'cypress' : (mod === 1 ? 'oak' : 'pine');
+      tryAddTree(-111.5 + (Math.abs(z * 3) % 2), z, type, 1.25);
+    }
+
+    // 4. South Infield: Safely flanking the Paddock and VIP Hospitality
+    // West wing of Paddock
+    for (let x = -82; x <= -58; x += 10.0) {
+      tryAddTree(x, -112, 'cypress', 1.3);
+    }
+    // East wing of Paddock
+    for (let x = 54; x <= 82; x += 10.0) {
+      tryAddTree(x, -112, 'cypress', 1.3);
+    }
+    // VIP Cypress Boulevard behind Team Paddock yard (z = -80)
+    for (let x = -50; x <= 50; x += 9.5) {
+      tryAddTree(x, -80, 'cypress', 1.35);
+    }
+
+    // 5. 4 CORNER INNER APEX BOTANICAL GROVES (Inside apex curves at r = 8 to 19m)
+    cornerAngles.forEach(({ cx, cz }) => {
+      const signX = Math.sign(cx);
+      const signZ = Math.sign(cz);
+
+      // Apex Row 1 (Core inner park: r = 8 to 13m)
+      for (let a = 0.08; a < Math.PI / 2 - 0.08; a += 0.11) {
+        const dist = 9.5 + ((a * 5) % 2.5);
+        const kx = cx - signX * Math.cos(a) * dist;
+        const kz = cz - signZ * Math.sin(a) * dist;
+        const type = Math.floor(a * 10) % 2 === 0 ? 'cypress' : 'oak';
+        tryAddTree(kx, kz, type, 1.25);
+      }
+
+      // Apex Row 2 (Mid apex park: r = 14 to 19m)
+      for (let a = 0.10; a < Math.PI / 2 - 0.10; a += 0.10) {
+        const dist = 15.5 + ((a * 6) % 2.5);
+        const kx = cx - signX * Math.cos(a) * dist;
+        const kz = cz - signZ * Math.sin(a) * dist;
+        const type = Math.floor(a * 10) % 2 === 0 ? 'pine' : 'cypress';
+        tryAddTree(kx, kz, type, 1.3);
+      }
+    });
+
+    // =========================================================================
+    // TRACKSIDE SHRUB HEDGES (Strictly clear of walls and grandstands)
+    // =========================================================================
+    const barrierBushPositions: Array<[number, number, number]> = [];
+
+    // Along North inner barrier meadow (z ≈ 114)
+    for (let x = -75; x <= 75; x += 8.0) barrierBushPositions.push([x, 114.5, 1.05]);
+    // Along East inner barrier meadow (x ≈ 114)
+    for (let z = -75; z <= 75; z += 8.0) barrierBushPositions.push([114.5, z, 1.05]);
+    // Along West inner barrier meadow (x ≈ -114)
+    for (let z = -75; z <= 75; z += 8.0) barrierBushPositions.push([-114.5, z, 1.05]);
+    // Along South outer barrier meadow (only west and east of grandstand)
+    for (let x = -125; x <= -76; x += 8.5) barrierBushPositions.push([x, -145.5, 1.1]);
+    for (let x = 76; x <= 125; x += 8.5) barrierBushPositions.push([x, -145.5, 1.1]);
+
+    // Outer corner shrub hedges (r = 65.2m, nestled right behind corner gravel traps)
+    cornerAngles.forEach(({ cx, cz, startAng }) => {
+      for (let a = 0.05; a < Math.PI / 2 - 0.05; a += 0.08) {
+        const ang = startAng + a;
+        barrierBushPositions.push([cx + Math.cos(ang) * 65.2, cz + Math.sin(ang) * 65.2, 1.15]);
+      }
+    });
+
+    // Inner corner apex shrub hedges (r = 20.5m, along inner apex grass margins)
+    cornerAngles.forEach(({ cx, cz }) => {
+      const signX = Math.sign(cx);
+      const signZ = Math.sign(cz);
+      for (let a = 0.10; a < Math.PI / 2 - 0.10; a += 0.10) {
+        barrierBushPositions.push([cx - signX * Math.cos(a) * 20.5, cz - signZ * Math.sin(a) * 20.5, 1.1]);
+      }
+    });
+
+    barrierBushPositions.forEach(([bx, bz, scale]) => {
+      const bushR = 1.2 * scale;
       if (isTreeSafe(bx, bz, bushR)) {
         const rotY = (Math.abs(bx * 19 + bz * 23) % 628) / 100;
-        bushList.push({ x: bx, z: bz, scale: 1.1, rotY });
+        bushList.push({ x: bx, z: bz, scale, rotY });
         placedTrees.push({ x: bx, z: bz, r: bushR });
       }
-
-      const bxIn = pt.x - nx * 18.0;
-      const bzIn = pt.z - nz * 18.0;
-      if (isTreeSafe(bxIn, bzIn, bushR)) {
-        const rotY = (Math.abs(bxIn * 19 + bzIn * 23) % 628) / 100;
-        bushList.push({ x: bxIn, z: bzIn, scale: 1.1, rotY });
-        placedTrees.push({ x: bxIn, z: bzIn, r: bushR });
-      }
-    }
+    });
 
     // =========================================================================
     // HARDWARE INSTANCING COMPILATION (7 Draw Calls Total for the entire forest!)
@@ -3020,26 +3411,28 @@ export class TrackBuilder {
   private buildSpeedTrapRadarAndSectorGantries(): void {
     const radarGroup = new THREE.Group();
 
-    // 1. Super Straight High-Speed Radar Gantry (x = -100, z = -50)
-    const superStraightGantry = new THREE.Group();
-    superStraightGantry.position.set(-100, 0, -50);
+    // 1. North Straight High-Speed Gantry (x = 0, z = 130)
+    const northGantry = new THREE.Group();
+    northGantry.position.set(0, 0, this.halfSize);
 
-    const spanX = 32;
+    const spanZ = 32;
     const gantryH = 7.8;
-    const beamGeo = new THREE.BoxGeometry(spanX, 1.4, 1.4);
+    // Beam spans along Z axis across the full track width (diffuse-dominant PBR to eliminate specular IBL spikes when passing underneath)
+    const beamGeo = new THREE.BoxGeometry(1.4, 1.4, spanZ);
     const beam = new THREE.Mesh(beamGeo, this.overheadTrussMat);
     beam.position.y = gantryH;
     beam.castShadow = false;
     beam.receiveShadow = false;
-    superStraightGantry.add(beam);
+    northGantry.add(beam);
 
-    [-spanX / 2 + 0.8, spanX / 2 - 0.8].forEach((px) => {
+    // Support Pillars safely behind barrier walls (infield and outfield)
+    [-spanZ / 2 + 0.8, spanZ / 2 - 0.8].forEach((pz) => {
       const pGeo = new THREE.BoxGeometry(1.2, gantryH, 1.2);
       const pMesh = new THREE.Mesh(pGeo, this.overheadTrussMat);
-      pMesh.position.set(px, gantryH / 2, 0);
+      pMesh.position.set(0, gantryH / 2, pz);
       pMesh.castShadow = false;
       pMesh.receiveShadow = false;
-      superStraightGantry.add(pMesh);
+      northGantry.add(pMesh);
     });
 
     // Digital Speed Trap Radar Display
@@ -3051,18 +3444,19 @@ export class TrackBuilder {
     rCtx.fillRect(0, 0, 256, 64);
     rCtx.fillStyle = '#38bdf8';
     rCtx.font = 'bold 32px monospace';
-    rCtx.fillText('SPEED TRAP: 358 KM/H', 10, 44);
+    rCtx.fillText('SPEED TRAP: 328 KM/H', 10, 44);
     const radarTex = new THREE.CanvasTexture(radarCanvas);
     const radarMat = new THREE.MeshBasicMaterial({ map: radarTex });
-    const radarMesh = new THREE.Mesh(new THREE.BoxGeometry(8, 1.2, 0.2), radarMat);
-    radarMesh.position.set(0, gantryH, 0.75);
-    superStraightGantry.add(radarMesh);
+    const radarMesh = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.2, 8), radarMat);
+    radarMesh.position.set(0.75, gantryH, 0);
+    northGantry.add(radarMesh);
 
-    const speedShadow = this.createOverheadSoftShadow(spanX + 2.0, 3.8, 'speed_trap', 0.60);
-    speedShadow.position.set(0, 0.016, -4.5);
-    superStraightGantry.add(speedShadow);
+    // Realistic Integrated Ground Contact Shadow for North Speed Trap Gantry (With Radar Housing & Warren Truss Silhouettes)
+    const northShadow = this.createOverheadSoftShadow(3.8, spanZ + 2.0, 'speed_trap', 0.60);
+    northShadow.position.set(-4.5, 0.016, 0);
+    northGantry.add(northShadow);
 
-    radarGroup.add(superStraightGantry);
+    radarGroup.add(northGantry);
     this.group.add(radarGroup);
   }
 
@@ -3148,22 +3542,24 @@ export class TrackBuilder {
   private buildDynamicProps(): void {
     let propId = 0;
 
-    // 1. Distance Brake Marker Boards on Key Braking Zones
+    // 1. Distance Brake Marker Boards on All 4 Straights
     const signConfigs = [
-      // Turn 1 Variante Chicane Heavy Braking (Approach from S/F Straight)
-      { text: '150m', x: 65, z: -140 },
-      { text: '100m', x: 85, z: -140 },
-      { text: '50m',  x: 105, z: -140 },
-
-      // Turn 8 180° Slow Hairpin Heavy Braking
-      { text: '150m', x: -15, z: 232 },
-      { text: '100m', x: -35, z: 232 },
-      { text: '50m',  x: -55, z: 232 },
-
-      // Turn 10 Bus Stop Chicane Braking (Approach from Super Straight / 130R)
-      { text: '150m', x: -112, z: -70 },
-      { text: '100m', x: -108, z: -90 },
-      { text: '50m',  x: -100, z: -110 },
+      // South Straight (Approach to T1)
+      { text: '150m', x: 35, z: -this.halfSize - 10.2 },
+      { text: '100m', x: 55, z: -this.halfSize - 10.2 },
+      { text: '50m', x: 75, z: -this.halfSize - 10.2 },
+      // East Straight (Approach to T2)
+      { text: '150m', x: this.halfSize + 10.2, z: 35 },
+      { text: '100m', x: this.halfSize + 10.2, z: 55 },
+      { text: '50m', x: this.halfSize + 10.2, z: 75 },
+      // North Straight (Approach to T3)
+      { text: '150m', x: 30, z: this.halfSize + 10.2 },
+      { text: '100m', x: -10, z: this.halfSize + 10.2 },
+      { text: '50m', x: -50, z: this.halfSize + 10.2 },
+      // West Straight (Approach to T4)
+      { text: '150m', x: -this.halfSize - 10.2, z: -35 },
+      { text: '100m', x: -this.halfSize - 10.2, z: -55 },
+      { text: '50m', x: -this.halfSize - 10.2, z: -75 },
     ];
 
     signConfigs.forEach((cfg) => {
@@ -3213,14 +3609,12 @@ export class TrackBuilder {
       });
     });
 
-    // 2. Official Turn Number Signs (T1 Chicane, T3 Sweeper, T4-T7 Esses, T8 Hairpin, T9 130R, T10 Bus Stop)
+    // 2. Official Turn Number Signs (T1, T2, T3, T4)
     const turnSigns = [
-      { text: 'VARIANTE T1', x: 138, z: -138 },
-      { text: 'THE SWEEP T3', x: 198, z: 20 },
-      { text: 'THE ESSES T4-7', x: 80, z: 200 },
-      { text: 'HAIRPIN T8', x: -105, z: 220 },
-      { text: 'CURVONE 130R', x: -115, z: -95 },
-      { text: 'BUS STOP T10', x: -75, z: -142 },
+      { text: 'TURN 1', x: 88, z: -145 },
+      { text: 'TURN 2', x: 145, z: 88 },
+      { text: 'TURN 3', x: -88, z: 145 },
+      { text: 'TURN 4', x: -145, z: -88 },
     ];
 
     turnSigns.forEach((ts) => {
@@ -3255,6 +3649,106 @@ export class TrackBuilder {
       tGroup.add(leg2);
 
       this.group.add(tGroup);
+    });
+
+    // 3. Corner Apex Slalom Cones (Fluorescent Orange)
+    const conePositions = [
+      { x: 92, z: -84 },
+      { x: 84, z: 92 },
+      { x: -92, z: 84 },
+      { x: -84, z: -92 },
+    ];
+
+    conePositions.forEach((pos) => {
+      const coneGeo = new THREE.ConeGeometry(0.24, 0.65, 10);
+      const coneMat = new THREE.MeshStandardMaterial({
+        color: 0xf97316,
+        roughness: 0.35,
+        metalness: 0.1,
+      });
+      const coneMesh = new THREE.Mesh(coneGeo, coneMat);
+      coneMesh.position.set(pos.x, 0.325, pos.z);
+      coneMesh.castShadow = true;
+      this.group.add(coneMesh);
+
+      this.dynamicProps.push({
+        id: propId++,
+        type: 'cone',
+        mesh: coneMesh,
+        position: new THREE.Vector3(pos.x, 0, pos.z),
+        velocity: new THREE.Vector3(0, 0, 0),
+        rotation: new THREE.Vector3(0, 0, 0),
+        angularVelocity: new THREE.Vector3(0, 0, 0),
+        radius: 0.35,
+        height: 0.65,
+        mass: 3.5,
+        isSleeping: true,
+        baseY: 0.325,
+      });
+    });
+
+    // 4. High-Frequency FIA Distance Brake Marker Boards (200m, 150m, 100m, 50m)
+    // Enhances peripheral optical flow parallax before all 4 corner entries
+    const distanceMarkers = ['200', '150', '100', '50'];
+    const markerConfigs = [
+      // Approach to Turn 1 (South Straight, facing West)
+      { startX: 5, stepX: 22, z: -138.8, rotY: 0 },
+      // Approach to Turn 2 (East Straight, facing South)
+      { startZ: 5, stepZ: 22, x: 138.8, rotY: -Math.PI / 2 },
+      // Approach to Turn 3 (North Straight, facing East)
+      { startX: -5, stepX: -22, z: 138.8, rotY: Math.PI },
+      // Approach to Turn 4 (West Straight, facing North)
+      { startZ: -5, stepZ: -22, x: -138.8, rotY: Math.PI / 2 },
+    ];
+
+    const distBoardGeo = new THREE.BoxGeometry(1.6, 1.1, 0.08);
+
+    markerConfigs.forEach((cfg) => {
+      distanceMarkers.forEach((distText, dIdx) => {
+        const posX = cfg.startX !== undefined ? cfg.startX + dIdx * cfg.stepX! : cfg.x!;
+        const posZ = cfg.startZ !== undefined ? cfg.startZ + dIdx * cfg.stepZ! : cfg.z!;
+
+        const dCanvas = document.createElement('canvas');
+        dCanvas.width = 256;
+        dCanvas.height = 160;
+        const dCtx = dCanvas.getContext('2d')!;
+
+        // Pure black high-contrast background with fluorescent safety yellow border
+        dCtx.fillStyle = '#09090b';
+        dCtx.fillRect(0, 0, 256, 160);
+        dCtx.lineWidth = 12;
+        dCtx.strokeStyle = '#facc15';
+        dCtx.strokeRect(6, 6, 244, 148);
+
+        dCtx.fillStyle = '#ffffff';
+        dCtx.font = '900 82px "Arial Black", sans-serif';
+        dCtx.textAlign = 'center';
+        dCtx.textBaseline = 'middle';
+        dCtx.fillText(distText, 128, 80);
+
+        const dTex = new THREE.CanvasTexture(dCanvas);
+        const dMat = new THREE.MeshStandardMaterial({
+          map: dTex,
+          roughness: 0.35,
+          metalness: 0.15,
+        });
+
+        const mGroup = new THREE.Group();
+        mGroup.position.set(posX, 0, posZ);
+        mGroup.rotation.y = cfg.rotY;
+
+        const board = new THREE.Mesh(distBoardGeo, dMat);
+        board.position.y = 1.35;
+        board.castShadow = true;
+        mGroup.add(board);
+
+        // Ground anchor post
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 1.35, 8), this.metalDarkMat);
+        post.position.y = 0.675;
+        mGroup.add(post);
+
+        this.group.add(mGroup);
+      });
     });
   }
 

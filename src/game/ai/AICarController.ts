@@ -20,7 +20,6 @@ import {
   CIRCUIT_RACE_PACE_SPEED,
   formatF1TimeGap,
 } from '../career/CircuitWaypoints';
-import { getCircuitConfig, getCircuitWaypoints } from '../career/CircuitConfig';
 
 export type { SplinePoint };
 
@@ -112,7 +111,7 @@ export class AICarController {
   public finishTime: number = 0;
 
   // Track geometry metrics
-  public totalTrackLength: number = 974.76;
+  public readonly totalTrackLength = 974.76;
   public waypoints: SplinePoint[] = [];
   private lastClosestIdx: number = 0;
   private static _obstaclesPool: VehicleObstacle[] = [];
@@ -166,9 +165,8 @@ export class AICarController {
       this.defenseSkill = 0.85;
     }
 
-    const circuitCfg = getCircuitConfig();
-    this.waypoints = getCircuitWaypoints(circuitCfg.id);
-    this.totalTrackLength = circuitCfg.lengthMeters;
+    this.waypoints = SHARED_CIRCUIT_WAYPOINTS;
+    this.totalTrackLength = CIRCUIT_TOTAL_LENGTH;
     this.planPitStrategy(totalRaceLaps);
   }
 
@@ -224,13 +222,10 @@ export class AICarController {
    * Sets vehicle cleanly on its designated F1 Starting Grid slot (1 to 5)
    */
   public setGridPosition(gridSlot: number): void {
-    const circuitCfg = getCircuitConfig();
     const isLeft = gridSlot % 2 === 1;
-    const baseGridX = circuitCfg.startGrid.playerX;
-    const baseGridZ = circuitCfg.startGrid.playerZ;
-    const gridX = baseGridX - (gridSlot - 1) * 8.0;
-    const gridZ = isLeft ? baseGridZ : baseGridZ - 4.0;
-    const gridYaw = circuitCfg.startGrid.playerYaw; // Facing positive X down the main straight
+    const gridX = -18.0 - (gridSlot - 1) * 8.0;
+    const gridZ = isLeft ? -128.0 : -132.0;
+    const gridYaw = Math.PI / 2; // Facing positive X down the main straight
 
     this.physics.reset(gridX, gridZ, gridYaw);
     this.gridStartX = gridX;
@@ -243,7 +238,7 @@ export class AICarController {
     this.carModel.group.position.copy(this.position);
     this.carModel.group.rotation.set(0, gridYaw, 0);
 
-    const startProgressX = gridX - (circuitCfg.id === 'square_gp' ? -92.0 : -250.0);
+    const startProgressX = gridX - (-92.0);
     this.distanceAlongTrack = Math.max(0, startProgressX);
     this.trackProgressNormalized = this.distanceAlongTrack / this.totalTrackLength;
 

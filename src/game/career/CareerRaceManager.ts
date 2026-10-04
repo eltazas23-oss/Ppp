@@ -20,7 +20,6 @@ import {
   formatF1TimeGap,
   formatF1LapTime,
 } from './CircuitWaypoints';
-import { getCircuitConfig } from './CircuitConfig';
 import { VehiclePhysics } from '../physics/VehiclePhysics';
 import { ParticleSystem } from '../particles/ParticleSystem';
 import { EngineSound } from '../audio/EngineSound';
@@ -110,9 +109,8 @@ export class CareerRaceManager {
     this.raceWinner = null;
     this.isShowingPodium = false;
 
-    // Set player to Pole Position on the active circuit grid
-    const circuitCfg = getCircuitConfig();
-    playerPhysics.reset(circuitCfg.startGrid.playerX, circuitCfg.startGrid.playerZ, circuitCfg.startGrid.playerYaw);
+    // Set player to Pole Position (Grid Slot 1: x = -18.0, z = -128.0, yaw = Math.PI / 2)
+    playerPhysics.reset(-18.0, -128.0, Math.PI / 2);
     playerPhysics.speed = 0;
     playerPhysics.gear = 1;
 

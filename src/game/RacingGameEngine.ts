@@ -14,9 +14,6 @@ import { SpeedPostEffect } from './effects/SpeedPostEffect';
 import { PitStopManager } from './pit/PitStopManager';
 import { CarInputs, VehiclePhysics } from './physics/VehiclePhysics';
 import { DynamicProp, StaticObstacle, TrackBuilder } from './world/TrackBuilder';
-import { SpeedwayTrackBuilder } from './world/SpeedwayTrackBuilder';
-import { CircuitId, getCircuitConfig, setActiveCircuitId } from './career/CircuitConfig';
-import { getTrackDistanceAtPosition } from './career/CircuitWaypoints';
 import { RivalTelemetryData } from './multiplayer/MultiplayerClient';
 import { TireCompoundType } from './physics/TireCompound';
 import { CareerRaceManager } from './career/CareerRaceManager';
@@ -76,11 +73,10 @@ export class RacingGameEngine {
   private renderer: THREE.WebGLRenderer;
 
   // Subsystems
-  public circuitId: CircuitId = 'square_gp';
   public audio: EngineSound;
   public physics: VehiclePhysics;
   public carModel: CarModel;
-  public track: TrackBuilder | SpeedwayTrackBuilder;
+  public track: TrackBuilder;
   public particles: ParticleSystem;
   public heatHaze: HeatHazeEffect;
   public speedEffect: SpeedPostEffect;
@@ -163,11 +159,8 @@ export class RacingGameEngine {
     carModel: CarModel;
   }> = [];
 
-  constructor(container: HTMLElement, circuitId: CircuitId = 'square_gp') {
+  constructor(container: HTMLElement) {
     this.container = container;
-    this.circuitId = circuitId;
-    setActiveCircuitId(circuitId);
-    const circuitCfg = getCircuitConfig(circuitId);
 
     // 1. Scene with atmospheric horizon depth fog (starts at 200m to preserve full contrast and saturation)
     this.scene = new THREE.Scene();
@@ -184,7 +177,7 @@ export class RacingGameEngine {
       0.25,
       1200
     );
-    this.camera.position.set(circuitCfg.startGrid.playerX - 25, 5, circuitCfg.startGrid.playerZ);
+    this.camera.position.set(-45, 5, -130);
 
     // 3. Ultra High-Performance Renderer with Calibrated Pixel Ratio & Hardware PCF Shadow Filtering
     this.renderer = new THREE.WebGLRenderer({
@@ -209,14 +202,10 @@ export class RacingGameEngine {
 
     // 4. Subsystems
     this.audio = new EngineSound();
-    // Start vehicle at the official Pole Position for the selected circuit
-    this.physics = new VehiclePhysics(
-      circuitCfg.startGrid.playerX,
-      circuitCfg.startGrid.playerZ,
-      circuitCfg.startGrid.playerYaw
-    );
+    // Start vehicle at the official Pole Position: x = -18.0, z = -128.0, yaw = Math.PI / 2
+    this.physics = new VehiclePhysics(-18.0, -128.0, Math.PI / 2);
     this.carModel = new CarModel();
-    this.track = circuitId === 'apex_speedway' ? new SpeedwayTrackBuilder() : new TrackBuilder();
+    this.track = new TrackBuilder();
     this.particles = new ParticleSystem();
     this.heatHaze = new HeatHazeEffect();
     this.speedEffect = new SpeedPostEffect(this.camera);
@@ -944,15 +933,15 @@ export class RacingGameEngine {
 
     if (this.pitStop.phase === 'none' && this.pitStop.cooldownTimer <= 0) {
       // 1. Pit Entry Corridor: triggers automatic 60 km/h pit speed limiter & autopilot docking
-      const inEntryCorridor = x >= pz.minX && x <= (pz.minX + 45) && z >= pz.minZ && z <= pz.maxZ;
+      // Only triggers cleanly once committed deep inside the pit apron (z >= -119.5, leaving main track at z <= -122.0 completely free of false triggers!)
+      const inEntryCorridor = x >= -65 && x <= -20 && z >= -119.5 && z <= -106.0;
       if (inEntryCorridor && this.physics.speed > 0.3) {
         this.pitStop.startPitEntryAutopilot(this.physics, this.audio);
         return;
       }
 
       // 2. Direct Pit Box Service Apron: triggers immediate docking & jack lift if car enters or stops in box
-      const boxCenterX = (pz.minX + pz.maxX) * 0.5;
-      const inBoxApron = x >= (boxCenterX - 14) && x <= (boxCenterX + 14) && z >= pz.minZ && z <= pz.maxZ;
+      const inBoxApron = x >= -14 && x <= 14 && z >= -119.5 && z <= -106.0;
       if (inBoxApron && Math.abs(this.physics.speed) < 10.0) {
         this.pitStop.startPitStop(this.physics, this.audio);
         return;
@@ -968,18 +957,15 @@ export class RacingGameEngine {
     this.pitStop.cooldownTimer = 0;
 
     const { x, z } = this.physics.position;
-    const pz = this.track.pitZone;
-    const inPitLane = x >= pz.minX && x <= pz.maxX && z >= pz.minZ && z <= pz.maxZ;
+    const inPitLane = x >= -65 && x <= 25 && z >= -121.8 && z <= -105.0;
     if (inPitLane) {
       // Already in or near the pit lane: dock immediately
       this.pitStop.startPitStop(this.physics, this.audio);
     } else {
       // Out on track: position vehicle at start of pit box docking zone for immediate service
-      const boxCenterX = (pz.minX + pz.maxX) * 0.5;
-      const boxCenterZ = (pz.minZ + pz.maxZ) * 0.5;
-      this.physics.position.x = boxCenterX;
+      this.physics.position.x = -3.2;
       this.physics.position.y = 0.35;
-      this.physics.position.z = boxCenterZ;
+      this.physics.position.z = -110.5;
       let diff = ((Math.PI / 2) - this.physics.yaw) % (Math.PI * 2);
       if (diff > Math.PI) diff -= Math.PI * 2;
       if (diff < -Math.PI) diff += Math.PI * 2;
@@ -995,57 +981,22 @@ export class RacingGameEngine {
 
   private updateLapSector(): void {
     const { x, z } = this.physics.position;
-    const circuitCfg = getCircuitConfig(this.circuitId);
-    const trackDist = getTrackDistanceAtPosition(x, z, this.circuitId);
-    const progress = trackDist / circuitCfg.lengthMeters;
 
-    if (this.currentSector === 0 && progress > 0.22 && progress < 0.45) {
+    if (this.currentSector === 0 && x > 40 && z < -50) {
       this.currentSector = 1;
-    } else if (this.currentSector === 1 && progress > 0.45 && progress < 0.70) {
+    } else if (this.currentSector === 1 && x > 50 && z > 40) {
       this.currentSector = 2;
-    } else if (this.currentSector === 2 && progress > 0.70 && progress < 0.90) {
+    } else if (this.currentSector === 2 && x < -40 && z > 50) {
       this.currentSector = 3;
-    } else if (this.currentSector === 3 && progress > 0.90) {
+    } else if (this.currentSector === 3 && x < -50 && z < -40) {
       this.currentSector = 4;
-    } else if (this.currentSector === 4 && progress < 0.12) {
+    } else if (this.currentSector === 4 && z < -this.track.halfSize + 15 && x >= -15 && x <= 20) {
       if (!this.bestLapTime || this.currentLapTime < this.bestLapTime) {
         this.bestLapTime = this.currentLapTime;
       }
       this.lapCount++;
       this.currentLapTime = 0;
       this.currentSector = 0;
-    }
-  }
-
-  /**
-   * Dynamically loads and switches between FIA circuits in real-time
-   */
-  public loadCircuit(circuitId: CircuitId): void {
-    if (this.circuitId === circuitId && this.track) return;
-
-    this.scene.remove(this.track.group);
-    this.circuitId = circuitId;
-    setActiveCircuitId(circuitId);
-
-    const circuitCfg = getCircuitConfig(circuitId);
-    this.track = circuitId === 'apex_speedway' ? new SpeedwayTrackBuilder() : new TrackBuilder();
-    this.scene.add(this.track.group);
-
-    // Reset player on active grid
-    this.physics.reset(
-      circuitCfg.startGrid.playerX,
-      circuitCfg.startGrid.playerZ,
-      circuitCfg.startGrid.playerYaw
-    );
-    this.lapCount = 1;
-    this.currentLapTime = 0;
-    this.bestLapTime = null;
-    this.currentSector = 0;
-
-    // Reset Career AI grid if race manager exists
-    if (this.careerRaceManager) {
-      this.careerRaceManager.scene = this.scene;
-      this.careerRaceManager.startRace(this.physics);
     }
   }
 

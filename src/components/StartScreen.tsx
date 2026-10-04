@@ -14,11 +14,8 @@ import { CameraDistanceMode, CameraViewMode } from '../game/RacingGameEngine';
 import { MultiplayerRoomState } from '../game/multiplayer/MultiplayerClient';
 import { RaceDifficulty, RaceLapOption } from '../game/career/CareerTypes';
 import { TireCompoundType } from '../game/physics/TireCompound';
-import { CircuitId } from '../game/career/CircuitConfig';
 
 export interface StartScreenProps {
-  selectedCircuit?: CircuitId;
-  onSelectCircuit?: (id: CircuitId) => void;
   onStartSolo: (
     cameraDistance: CameraDistanceMode,
     cameraMode: CameraViewMode,

@@ -18,16 +18,12 @@ import { X, Upload, CheckCircle2, AlertCircle, RefreshCw, Car, Users, Wrench } f
 
 import { TireCompoundType } from './game/physics/TireCompound';
 import { RaceDifficulty, RaceLapOption } from './game/career/CareerTypes';
-import { CircuitId } from './game/career/CircuitConfig';
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<RacingGameEngine | null>(null);
   const multiplayerRef = useRef<MultiplayerClient | null>(null);
   const modelFileInputRef = useRef<HTMLInputElement>(null);
-
-  // Circuit Selection State
-  const [selectedCircuit, setSelectedCircuit] = useState<CircuitId>('square_gp');
 
   // Game UI & Start States
   const [hasStarted, setHasStarted] = useState(false);
@@ -106,13 +102,6 @@ export default function App() {
       // Activate: stays on through straights and corners until braking or manual toggle
       engineRef.current.inputs.drs = true;
       engineRef.current.physics.isDrsOpen = true;
-    }
-  }, []);
-
-  const handleSelectCircuit = useCallback((circuitId: CircuitId) => {
-    setSelectedCircuit(circuitId);
-    if (engineRef.current) {
-      engineRef.current.loadCircuit(circuitId);
     }
   }, []);
 
@@ -583,8 +572,6 @@ export default function App() {
       {/* Start Screen & Lobby Overlay */}
       {!hasStarted && (
         <StartScreen
-          selectedCircuit={selectedCircuit}
-          onSelectCircuit={handleSelectCircuit}
           onStartSolo={handleStartSolo}
           onStartFreePractice={handleStartFreePractice}
           onCreateRoom={handleCreateRoom}

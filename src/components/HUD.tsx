@@ -63,12 +63,12 @@ export const HUD = React.memo<HUDProps>(({
   const rpmPercent = Math.min(100, Math.max(0, ((telemetry.rpm - 1000) / 8500) * 100));
   const isRedline = telemetry.rpm > 8700;
 
-  // Mini-map coordinates translation (Official F1 Circuit World bounds: X[-115..195], Z[-145..235])
+  // Mini-map coordinates translation
   const posX = carPosition ? carPosition.x : telemetry.carX;
   const posZ = carPosition ? carPosition.z : telemetry.carZ;
   const yaw = carPosition ? carPosition.yaw : telemetry.carYaw;
-  const mapX = ((posX - (-115)) / 310) * 100;
-  const mapY = ((posZ - (-145)) / 380) * 100;
+  const mapX = 50 + (posX * 0.35);
+  const mapY = 50 + (posZ * 0.35);
   const carHeadingDeg = (yaw * 180) / Math.PI;
 
   const currentCompound = TIRE_COMPOUNDS[telemetry.tireCompound] || TIRE_COMPOUNDS.soft;
@@ -127,50 +127,23 @@ export const HUD = React.memo<HUDProps>(({
           {/* Left: Compact Circuit Mini-Map & Lap Chrono */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             {/* Radar Mini-map */}
-            <div className="relative w-10 h-10 sm:w-12 sm:h-12 bg-neutral-900/90 rounded-xl border border-white/10 overflow-hidden shrink-0 flex items-center justify-center shadow-inner">
-              <svg viewBox="-115 -145 310 380" className="w-full h-full p-1 opacity-90">
-                {/* Circuit Track Ribbon Base */}
-                <path
-                  d="M -70 -130 L 95 -130 Q 120 -128 142 -116 Q 140 -100 145 -82 Q 154 -60 172 -20 Q 184 25 172 70 Q 155 100 135 125 Q 115 142 95 160 Q 70 178 45 195 Q 15 210 -15 218 Q -40 222 -65 220 Q -88 205 -96 180 Q -100 150 -100 120 L -100 -80 Q -95 -105 -88 -120 Q -80 -126 -74 -129 Z"
-                  fill="none"
-                  stroke="#52525b"
-                  strokeWidth="24"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M -70 -130 L 95 -130 Q 120 -128 142 -116 Q 140 -100 145 -82 Q 154 -60 172 -20 Q 184 25 172 70 Q 155 100 135 125 Q 115 142 95 160 Q 70 178 45 195 Q 15 210 -15 218 Q -40 222 -65 220 Q -88 205 -96 180 Q -100 150 -100 120 L -100 -80 Q -95 -105 -88 -120 Q -80 -126 -74 -129 Z"
-                  fill="none"
-                  stroke="#18181b"
-                  strokeWidth="16"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                {/* DRS Zone 2 on Kemmel Super Straight */}
-                <path
-                  d="M -100 120 L -100 -60"
-                  fill="none"
-                  stroke="#06b6d4"
-                  strokeWidth="6"
-                  strokeLinecap="round"
-                />
-                {/* Pit Lane Green Dashed Route */}
-                <path
-                  d="M -70 -122 L -55 -113.75 L 35 -113.75 L 50 -122"
-                  fill="none"
-                  stroke="#10b981"
-                  strokeWidth="6"
-                  strokeDasharray="8,8"
-                />
-                {/* S/F Line Red Marker */}
-                <line x1="-5" y1="-142" x2="-5" y2="-118" stroke="#ef4444" strokeWidth="6" />
-
-                {/* Live Car Position & Heading Arrow */}
-                <g transform={`translate(${posX}, ${posZ}) rotate(${carHeadingDeg})`}>
-                  <circle r="10" fill="#ef4444" stroke="#ffffff" strokeWidth="3" />
-                  <polygon points="0,-16 6,-4 -6,-4" fill="#ffffff" />
-                </g>
+            <div className="relative w-8 h-8 sm:w-10 sm:h-10 bg-neutral-900/90 rounded-xl border border-white/10 overflow-hidden shrink-0 flex items-center justify-center shadow-inner">
+              <svg viewBox="0 0 100 100" className="w-full h-full p-0.5 opacity-80">
+                <rect x="8" y="8" width="84" height="84" rx="14" ry="14" fill="none" stroke="#52525b" strokeWidth="6" />
+                <rect x="8" y="8" width="84" height="84" rx="14" ry="14" fill="none" stroke="#18181b" strokeWidth="4" />
+                <line x1="42" y1="92" x2="58" y2="92" stroke="#ef4444" strokeWidth="3" />
+                <line x1="40" y1="83" x2="65" y2="83" stroke="#10b981" strokeWidth="2" strokeDasharray="2,2" />
               </svg>
+              <div
+                className="absolute w-2 h-2 bg-red-500 rounded-full border border-white shadow-sm"
+                style={{
+                  left: `${Math.min(92, Math.max(8, mapX))}%`,
+                  top: `${Math.min(92, Math.max(8, mapY))}%`,
+                  transform: `translate(-50%, -50%) rotate(${carHeadingDeg}deg)`,
+                }}
+              >
+                <div className="w-0.5 h-1 bg-white mx-auto -mt-0.5 rounded-full" />
+              </div>
             </div>
 
             {/* Lap Counter & Chronometer */}
